@@ -166,8 +166,13 @@ quietly. Implemented — see G0.
   reachability). Manual sim: `.venv/bin/python -m tests.mock_bridge`.
   New env overrides: `TR_BRIDGE_BASE` (point the planner at any bridge URL,
   e.g. the sim), `TR_HEARTBEAT_TIMEOUT` (shorten for tests).
-  **Still pending: in-game behavior of the 1.2.0 DLL itself** (spawn config
-  path, heartbeat cadence under real load) — needs one run with the game.
+  **Still pending: in-game behavior of the 1.2.0 DLL itself** — run the
+  §6 live checklist (spawn config path, heartbeat cadence, graceful-quit
+  stopping beat, supervision). Note: the stopping beat originally lived in
+  `OnApplicationQuit()`, which BRIDGE_FINDINGS says almost never fires in
+  this game (Unity doesn't dispatch lifecycle to the plugin) — the build
+  now hooks the static `Application.quitting` event + `AppDomain.ProcessExit`
+  instead, sent-once guarded.
 - **Known limitation carried to DEG-1:** heartbeat loss can't distinguish
   "game closed" from "bridge crashed while game up" — both read as
   save-only.
@@ -263,3 +268,54 @@ quietly. Implemented — see G0.
 6. **LV-1** (L) — provenance badges everywhere.
 7. **SLS-1** (L) — since-last-save tracker.
 8. **TST-1** (S/M) — WS broadcast test + live happy-path update with the game.
+
+---
+
+## 6. Live (in-game) verification checklist — what the simulator CANNOT prove
+
+The simulator (`tests/mock_bridge.py`) exercises the planner against the
+bridge's HTTP contract, so it can never prove the **in-game plugin's own
+behavior**: which Unity/BepInEx events actually fire, whether the real game
+APIs respond the way the reflection code expects, and whether process
+spawn/supervision works from inside the game. These need one session with
+the game running. Working through this list IS the live test suite.
+
+**Setup:** `dotnet build -c Release` → copy
+`bin/Release/netstandard2.1/PlannerBridge.dll` to
+`<game>/BepInEx/plugins/` → make sure no planner is running → start TR.
+Check `BepInEx/LogOutput.log` for `PlannerBridge 1.2.0 loaded`.
+
+- [ ] **L1 — Spawn (launch mode 1).** Game opens with no planner on :8765 →
+      bridge runs `start_planner.sh` → planner comes up and the UI is
+      reachable. Verify `Lifecycle.PlannerDir` in
+      `BepInEx/config/plannerbridge.cfg` points at the repo. (If spawn
+      fails, the log line names the path it tried.)
+- [ ] **L2 — Heartbeat cadence.** While playing, `GET /api/bridge/status`:
+      `heartbeat_age_s` stays under ~3s; UI pill is green "live".
+- [ ] **L3 — Verified before/after on a REAL mutation.** Add seeds of a
+      crop you actually own via the UI → response toast shows `(N → M)` and
+      N/M match the real in-game stack (open your inventory to confirm).
+      This is the fix for the original failing seed test.
+- [ ] **L4 — Live inventory sanity.** `/api/inventory/grouped` reflects
+      real counts (not the `ids 1..47 stack 0` garbage from
+      BRIDGE_FINDINGS) — i.e. `GetAllItems()` path still works in-game.
+- [ ] **L5 — Graceful quit (THE stopping-beat test).** Quit TR normally →
+      planner flips to quiet save-only within ~1-2s: NO beat_lost toast,
+      reason `no_bridge`. Then check `LogOutput.log` for
+      `PlannerBridge stopping (Application.quitting)` (or `ProcessExit`) —
+      proves the quit hook fired. NOTE: the original `OnApplicationQuit()`
+      implementation was almost certainly dead code in this game (Unity
+      never dispatches lifecycle messages to the plugin — see
+      BRIDGE_FINDINGS); the build now subscribes to the static
+      `Application.quitting` event + `AppDomain.ProcessExit`, sent-once
+      guarded. This test case is exactly why the simulator wasn't enough.
+- [ ] **L6 — Hard kill.** Kill the game process outright (`kill -9`) →
+      planner shows amber `beat_lost` after the ~6s timeout with the
+      "check BepInEx/LogOutput.log" toast. (No hook can fire on SIGKILL —
+      this is the designed degradation.)
+- [ ] **L7 — Supervision (optional).** With the game up and a
+      bridge-spawned planner running, kill the planner process → bridge
+      restarts it within ~10s (log: `Planner not answering … restart #1/3`).
+- [ ] **L8 — Share-mode spot check (if sharing).** `python -m planner
+      --share` → open the printed `#t=` URL from another device → buys work;
+      the same request WITHOUT the token → 401.
