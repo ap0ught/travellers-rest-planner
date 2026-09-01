@@ -390,6 +390,9 @@ export default function App() {
             // bridge events are realtime — reload sooner (150ms) to show inventory change before save flush
             setTimeout(reload, 150);
             setTimeout(() => fetchDebugSaves().then(setDebugSaves).catch(()=>{}), 600);
+          } else if (m.type === "live_status") {
+            // Bridge heartbeat flipped (G0): live vs save-only, instant.
+            setBridgeLive(!!m.live);
           } else if (m.type === "cart_updated" || m.type === "menu_updated") {
             pushToast("save", `${m.type}`);
           }
@@ -406,7 +409,9 @@ export default function App() {
     const check = async () => {
       try {
         const j = await fetchBridgeStatus();
-        const live = !!j.bridge;
+        // Heartbeat freshness (j.live, G0) is the mode authority; fall back to
+        // the raw proxy result for older bridges without heartbeats.
+        const live = j.live !== undefined ? !!j.live : !!j.bridge;
         setBridgeLive(live);
         setBridgeDebug(j);
         if (!live) setShopMode(null); // force readonly when bridge down

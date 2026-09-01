@@ -386,6 +386,18 @@ parsed data** so they run without the game or a save:
 - For the bridge, mark end-to-end tests that need the game running and **skip
   them automatically when the bridge/save is absent** (see
   `tests/test_live_seed_happy_path.py`).
+- **Simulate the bridge — the game is not needed for the contract.** The
+  bridge is *just an HTTP contract* (raw IDs/counts, verified before/after,
+  heartbeat), so a small standalone simulator lets you develop and test the
+  whole planner↔bridge pipeline without launching the game. This repo ships
+  one: `tests/mock_bridge.py` (stdlib Python, in-memory game state,
+  runnable manually via `python -m tests.mock_bridge` and from tests on an
+  ephemeral port). Pair it with env overrides so tests can aim the planner
+  at it: `TR_BRIDGE_BASE` (any bridge URL) and `TR_HEARTBEAT_TIMEOUT`
+  (shorten the live-mode timeout). The result: heartbeat→live-mode flips,
+  mutation before/after, offline 503 refusals, and status merges are all
+  covered by fast CI tests — only the in-game plugin's own behavior still
+  needs a real game run.
 
 ### The two live-update mechanisms — and why you want BOTH
 
@@ -458,8 +470,8 @@ game just started) is the natural component to *spawn the planner* when the
 game opens, to send a periodic **heartbeat** the planner uses to derive "live",
 and to supervise/restart the planner. The planner, in turn, is the
 **non-fragile** side: it owns all state, and losing the heartbeat simply drops
-it to save-only read mode. (Status of these features in this repo:
-[`GAP_ANALYSIS_2026-09-01.md`](GAP_ANALYSIS_2026-09-01.md) gap G0.)
+it to save-only read mode. (Implemented in this repo — see
+[`GAP_ANALYSIS_2026-09-01.md`](GAP_ANALYSIS_2026-09-01.md) gaps G0/G1.)
 
 **When you replicate for a new game:**
 - **Always build the watchdog path first.** It needs no mod, is robust, and is

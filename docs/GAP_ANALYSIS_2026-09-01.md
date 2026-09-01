@@ -130,33 +130,58 @@ gracefully. No heartbeat has never existed yet (see G0).
     401 without/with-wrong token, pass with header/query token,
     bridge-push 403 remote, 200 default).
 
-## 4. Open gaps (issue-ready)
+### G0 — Bridge-owned lifecycle: heartbeat + planner spawn ✅
+- **Was:** planner and bridge were independent processes that found each
+  other via opportunistic per-request HTTP polls; no heartbeat existed on
+  either side; no spawn/supervision; no mode concept.
+- **Fix (bridge `Plugin.cs` 1.2.0):**
+  - **Heartbeat thread** POSTs to the planner's
+    `/api/bridge/heartbeat` every 2s (configurable via
+    `BepInEx/config/plannerbridge.cfg` `Lifecycle.HeartbeatIntervalMs`),
+    quiet — no event spam; a final `stopping:true` beat on game quit lets
+    the planner drop to save-only instantly.
+  - **Launch mode 1:** on startup, if no planner answers on `:8765`, the
+    bridge spawns it (`bash start_planner.sh`, detached;
+    `Lifecycle.SpawnPlanner` + `Lifecycle.PlannerDir` config).
+  - **Supervision:** if a planner it owns stops answering (5 missed beats),
+    it restarts it — max 3 tries, 30s cooldown.
+  - Launch modes 2/3 need no code: a standalone planner simply starts
+    receiving beats and promotes itself.
+- **Fix (planner `app.py`):** heartbeat listener records the last beat;
+  `_bridge_live()` derives live mode purely from freshness (6s timeout ≈ 3
+  missed beats); `_live_status_watcher` broadcasts `live_status` on `/ws`
+  within ~1s of every transition; `/api/bridge/status` now carries
+  `live`/`heartbeat_age_s`/`heartbeat_timeout_s` (and still returns them on
+  503 when the bridge HTTP is down). Local-only in share mode (403 remote).
+- **Verified:** planner side proven end-to-end **without the game** via the
+  bridge simulator (`tests/mock_bridge.py` — the bridge is just an HTTP
+  contract, so a stdlib Python sim of Plugin.cs 1.2.0 covers it):
+  `tests/test_heartbeat.py` + `tests/test_mock_bridge_integration.py`
+  (103 passing) include a full-stack test — real uvicorn planner + sim
+  heartbeats — proving live flips ON from beats and OFF when they stop even
+  while the sim's HTTP still answers (heartbeat is the mode authority, not
+  reachability). Manual sim: `.venv/bin/python -m tests.mock_bridge`.
+  New env overrides: `TR_BRIDGE_BASE` (point the planner at any bridge URL,
+  e.g. the sim), `TR_HEARTBEAT_TIMEOUT` (shorten for tests).
+  **Still pending: in-game behavior of the 1.2.0 DLL itself** (spawn config
+  path, heartbeat cadence under real load) — needs one run with the game.
+- **Known limitation carried to DEG-1:** heartbeat loss can't distinguish
+  "game closed" from "bridge crashed while game up" — both read as
+  save-only.
 
-### G0 — No bridge-owned lifecycle: no heartbeat, bridge doesn't spawn the planner
-- **Vision:** launch modes 1–3 above; bridge heartbeats to `:8765`; bridge
-  `Process.Start`s (and supervises) the planner when the game opens;
-  planner derives mode from heartbeat presence.
-- **Current:** planner and bridge are independent processes that find each
-  other via opportunistic per-request HTTP polls
-  (`_fetch_live_bridge_counts` at `app.py:~280`, timeout 0.8s). No heartbeat
-  exists on either side. Bridge has no spawn/supervision code
-  (`System.Diagnostics` imported, unused). Planner has no mode concept at all.
-- **Impact:** root gap — the state matrix is unknowable, which blocks correct
-  mode badges, degraded-state flags, and the since-last-save tracker.
-- **Effort:** **L**. **Depends-on:** —. **Blocks:** G1, LV-1, SLS-1, DEG-1, TST-1.
-- **Files:** bridge `Plugin.cs` (heartbeat thread + Process.Start +
-  supervision), planner `app.py` (heartbeat listener + mode state +
-  `live_status` broadcast), `__main__.py` (mode flag).
-
-### G1 — No planner mode concept; no `live_status` over the WebSocket
-- **Vision:** planner tracks LIVE vs SAVE-ONLY mode (heartbeat-derived) and
-  broadcasts `live_status` on `/ws` on every transition; UI mode badge flips
-  without reload.
-- **Current:** no mode anywhere; `/ws` messages are only `save_changed`,
-  `cart_updated`, `menu_updated`, `bridge_event`; `#ws-pill` tracks only the
+### G1 — Planner mode concept + `live_status` over the WebSocket ✅
+- **Was:** no mode anywhere; `/ws` carried only `save_changed`,
+  `cart_updated`, `menu_updated`, `bridge_event`; `#ws-pill` tracked only the
   websocket connection itself.
-- **Effort:** **M**. **Depends-on:** G0.
-- **Files:** `planner/server/app.py`, `planner/server/static.py`.
+- **Fix:** mode is heartbeat-derived (G0); `live_status` broadcast on every
+  flip; single-file UI got a `#live-pill` next to `#ws-pill`
+  (green *live* / quiet *save-only* — game-closed is the NORMAL state, so
+  no alarm colour; initial state fetched at boot); React UI flips
+  `bridgeLive` instantly from the WS message and its `/api/bridge/status`
+  poll now prefers the heartbeat `live` field (also kept on 503 payloads)
+  over raw proxy success.
+
+## 4. Open gaps (issue-ready)
 
 ### LV-1 — Live-vs-save provenance only on inventory; UI never renders it
 - **Vision:** every number that differs between live and save carries a
@@ -181,13 +206,20 @@ gracefully. No heartbeat has never existed yet (see G0).
   events).
 - **Files:** `planner/server/app.py` (new), `planner/server/static.py`.
 
-### DEG-1 — Degraded state not surfaced (bridge down while game up)
+### DEG-1 — Degraded state not surfaced (bridge down while game up) — narrowed
 - **Vision:** state matrix row 3 — a loud, explicit "bridge should be up"
   error, distinct from the normal save-only state.
-- **Current:** silently falls back to save data regardless of why the bridge
-  is absent; user is never told. Structurally mostly solved by G0 (mode is
-  knowable from heartbeat + launch parent), leaving the surfaced message.
-- **Effort:** **S/M**. **Depends-on:** G0, G1.
+- **Now:** G0/G1 landed the live-vs-save-only distinction with a visible
+  badge, so the *normal* state is properly quiet. What remains is row 3
+  specifically: heartbeat loss currently reads identically for "game
+  closed" (normal) and "bridge crashed while the game is up" (error), since
+  a crashed bridge cannot report anything. Distinguishing them needs an
+  independent game-liveness signal (e.g. the bridge watching the game
+  process from a separate supervisor, or the planner detecting the game
+  process) — or accepting the merge into one "connection lost" state with a
+  hint pointing at `BepInEx/LogOutput.log`.
+- **Effort:** **S** (accept merge + hint) / **M** (true row-3 detection).
+  **Depends-on:** G0 ✅, G1 ✅.
 - **Files:** `planner/server/app.py`, `planner/server/static.py`.
 
 ### TST-1 — No tests for the new contracts
@@ -195,12 +227,17 @@ gracefully. No heartbeat has never existed yet (see G0).
   pass-through, `bridge_event` routing, `live_status` broadcast, token gate —
   each auto-skipping when the game/bridge is absent (pattern already used by
   `test_live_seed_happy_path.py`).
-- **Current:** 90 passing tests cover catalog/currency/parser/math/API,
-  bridge realtime + rebroadcast, and the SEC-1 token gate
-  (`tests/test_share_token.py`). Still missing: heartbeat/mode transitions
-  (G0/G1), `live_status` broadcast, before/after pass-through in the live
-  happy-path test (needs the game+bridge running to update).
-- **Effort:** **M**. **Depends-on:** G0, G1.
+- **Current:** 103 passing tests. Covered: catalog/currency/parser/math/API,
+  bridge realtime + rebroadcast, SEC-1 token gate
+  (`test_share_token.py`), heartbeat mode flips + full planner↔sim
+  integration with verified before/after and the 503 offline refusal
+  (`test_heartbeat.py`, `test_mock_bridge_integration.py` against the
+  `tests/mock_bridge.py` simulator — no game needed). Remaining: `live_status`
+  WS broadcast assertion (needs a WS client test), and updating
+  `test_live_seed_happy_path.py` for the before/after shape with the real
+  game+bridge (the one thing the simulator can't prove — in-game DLL
+  behavior).
+- **Effort:** **S/M**. **Depends-on:** G0 ✅, G1 ✅.
 - **Files:** `tests/` (new), `tests/test_live_seed_happy_path.py` (update).
 
 ---
@@ -209,8 +246,8 @@ gracefully. No heartbeat has never existed yet (see G0).
 
 1. ~~**EV-1** (S) — quick win; makes MUT-2's before/after visible in the UI.~~ ✅ done
 2. ~~**SEC-1** (M) — sharing is exposed today.~~ ✅ done
-3. **G0** (L) — heartbeat + bridge-spawns-planner; unlocks everything below.
-4. **G1** (M) → **DEG-1** (S/M) — mode + status badge + degraded flag.
+3. ~~**G0** (L) — heartbeat + bridge-spawns-planner.~~ ✅ done (planner side proven via simulator; one in-game DLL check pending)
+4. ~~**G1** (M) — mode + `live_status` badge.~~ ✅ done → **DEG-1** (S/M) — row-3 distinction or accepted merge + hint
 5. **LV-1** (L) — provenance badges everywhere.
 6. **SLS-1** (L) — since-last-save tracker.
-7. **TST-1** (M) — lock it all in.
+7. **TST-1** (S/M) — WS broadcast test + live happy-path update with the game.

@@ -17,6 +17,7 @@ import asyncio
 import json as _json_mod
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
@@ -183,7 +184,11 @@ async def lifespan(app: FastAPI):
         _observer.schedule(SaveWatcher(loop), watch_path, recursive=not _single_file_mode)
         _observer.start()
         print(f"[planner] observer started single_file={_single_file_mode}", flush=True)
+    # Bridge heartbeat -> live_status watcher (G0/G1): flips the UI mode badge
+    # within ~1s of the heartbeat arriving or timing out.
+    live_task = asyncio.create_task(_live_status_watcher())
     yield
+    live_task.cancel()
     if _observer:
         _observer.stop()
         _observer.join()
@@ -241,6 +246,53 @@ def _write_denied(request: Request):
         {"error": "share token required — open the share link with its #t= token (or send the X-Share-Token header)"},
         status_code=401,
     )
+
+
+# ---------- Bridge heartbeat / live mode (gap G0/G1) ---------------------------
+# The bridge heartbeats every ~2s while the game runs. The planner derives
+# "live" purely from heartbeat freshness: first beat -> live mode, ~3 missed
+# beats -> save-only. The planner is the non-fragile side — no heartbeat just
+# means save-only reads; it never needs the bridge to survive.
+
+_bridge_last_beat: float = 0.0
+_bridge_last_info: dict = {}
+HEARTBEAT_TIMEOUT_S = 6.0  # default; override for tests via TR_HEARTBEAT_TIMEOUT
+
+
+def _heartbeat_timeout_s() -> float:
+    return float(os.environ.get("TR_HEARTBEAT_TIMEOUT", str(HEARTBEAT_TIMEOUT_S)))
+
+
+def _bridge_bases() -> list[str]:
+    """Bridge base URL(s) to try. Override with TR_BRIDGE_BASE (single URL) —
+    used by tests to point at the bridge simulator, or to move the bridge to
+    another port. Default: loopback, then localhost."""
+    env = os.environ.get("TR_BRIDGE_BASE")
+    return [env] if env else ["http://127.0.0.1:8766", "http://localhost:8766"]
+
+
+def _bridge_live() -> bool:
+    return (time.time() - _bridge_last_beat) < _heartbeat_timeout_s()
+
+
+async def _live_status_watcher():
+    """Broadcast live_status over /ws whenever live mode flips (G1)."""
+    last_live: bool | None = None
+    while True:
+        await asyncio.sleep(1.0)
+        live = _bridge_live()
+        if live != last_live:
+            last_live = live
+            age = (time.time() - _bridge_last_beat) if _bridge_last_beat else None
+            try:
+                await manager.broadcast({
+                    "type": "live_status",
+                    "live": live,
+                    "heartbeat_age_s": round(age, 1) if age is not None else None,
+                })
+                print(f"[planner] live_status: {'live (bridge heartbeat fresh)' if live else 'save-only (no bridge heartbeat)'}", flush=True)
+            except Exception:
+                pass
 
 
 # ---------- Routes -----------------------------------------------------------
@@ -316,7 +368,7 @@ def _fetch_live_bridge_counts(timeout: float = 0.8) -> dict[int, int] | None:
     This lets buy/sell appear instantly without waiting for save file autosave.
     """
     import urllib.request, json as _j
-    for base in ("http://127.0.0.1:8766", "http://localhost:8766"):
+    for base in _bridge_bases():
         try:
             with urllib.request.urlopen(base + "/debug/inventory", timeout=timeout) as r:
                 j = _j.loads(r.read().decode())
@@ -336,7 +388,7 @@ def _fetch_live_bridge_counts(timeout: float = 0.8) -> dict[int, int] | None:
 
 def _fetch_live_bridge_money(timeout: float = 0.6) -> int | None:
     import urllib.request, json as _j
-    for base in ("http://127.0.0.1:8766", "http://localhost:8766"):
+    for base in _bridge_bases():
         try:
             with urllib.request.urlopen(base + "/debug/state", timeout=timeout) as r:
                 j = _j.loads(r.read().decode())
@@ -942,7 +994,7 @@ async def _try_bridge(path: str, payload: dict, timeout: float = 3.5):
     success/failure instead of just 'queued'.
     """
     import urllib.request, urllib.error, json as _j
-    for base in ("http://127.0.0.1:8766", "http://localhost:8766"):
+    for base in _bridge_bases():
         try:
             data = _j.dumps(payload).encode()
             req = urllib.request.Request(base + path, data=data, headers={"Content-Type":"application/json"}, method="POST")
@@ -983,7 +1035,7 @@ async def api_cheat_money(data: dict, request: Request):
     # Try bridge first (realtime sync — now returns actual result, not just queued)
     try:
         import urllib.request, urllib.error, json as _j
-        for base in ("http://127.0.0.1:8766", "http://localhost:8766"):
+        for base in _bridge_bases():
             try:
                 bdata = _j.dumps({"copper": copper, "action": action}).encode()
                 req = urllib.request.Request(base + "/addMoney", data=bdata, headers={"Content-Type":"application/json"}, method="POST")
@@ -1149,24 +1201,55 @@ async def api_bridge_push(data: dict, request: Request):
     print(f"[bridge push] {ev.get('type') if isinstance(ev, dict) else t} -> broadcast bridge_event", flush=True)
     return {"ok": True, "broadcast": True}
 
+@app.post("/api/bridge/heartbeat")
+async def api_bridge_heartbeat(data: dict, request: Request):
+    """Bridge liveness heartbeat (G0). The in-game bridge POSTs every ~2s
+    while the game runs; freshness here is the sole definition of live mode.
+    Local-only in share mode (remote callers may not fake liveness)."""
+    if _share_mode() and not _is_local_client(request):
+        return JSONResponse({"error": "heartbeat is local-only"}, status_code=403)
+    global _bridge_last_beat, _bridge_last_info
+    _bridge_last_beat = time.time()
+    if isinstance(data, dict):
+        _bridge_last_info = {
+            k: data.get(k) for k in ("version", "uptime_s", "spawned_planner", "planner_restarts")
+            if k in data
+        }
+    return {"ok": True, "live": True}
+
+
 @app.get("/api/bridge/status")
 async def api_bridge_status():
-    # Proxy to BepInEx bridge so web UI can poll a single localhost:8765 endpoint
+    # Proxy to BepInEx bridge so web UI can poll a single localhost:8765 endpoint.
+    # Merges planner-side heartbeat state: "live" is derived from heartbeat
+    # freshness (G0), not just from this proxy call succeeding.
     import urllib.request, json as _j
-    for base in ("http://127.0.0.1:8766", "http://localhost:8766"):
+    live = _bridge_live()
+    heartbeat = {
+        "live": live,
+        "heartbeat_age_s": round(time.time() - _bridge_last_beat, 1) if _bridge_last_beat else None,
+        "heartbeat_timeout_s": _heartbeat_timeout_s(),
+        **({"bridge_info": _bridge_last_info} if _bridge_last_info else {}),
+    }
+    for base in _bridge_bases():
         try:
             with urllib.request.urlopen(base + "/bridge/status", timeout=1.0) as r:
                 body = r.read().decode()
                 j = _j.loads(body) if body else {}
-                return {"bridge": True, "realtime": True, "url": base, **j}
+                # Planner-side fields win: the bridge's own "bridge":"planner"
+                # identity string must not clobber the boolean contract.
+                return {**j, "bridge": True, "realtime": True, "url": base, **heartbeat}
         except Exception:
             continue
-    return JSONResponse({"bridge": False, "error": "bridge not running (restart TR, check BepInEx/LogOutput.log)"}, status_code=503)
+    return JSONResponse(
+        {"bridge": False, "error": "bridge not running (restart TR, check BepInEx/LogOutput.log)", **heartbeat},
+        status_code=503,
+    )
 
 @app.get("/api/bridge/events")
 async def api_bridge_events():
     import urllib.request, json as _j
-    for base in ("http://127.0.0.1:8766", "http://localhost:8766"):
+    for base in _bridge_bases():
         try:
             with urllib.request.urlopen(base + "/bridge/events", timeout=1.2) as r:
                 return _j.loads(r.read().decode())

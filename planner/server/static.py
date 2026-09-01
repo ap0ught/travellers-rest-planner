@@ -1914,6 +1914,7 @@ footer.colophon .orn {
       <select id="slot"></select>
       <select id="lang"></select>
       <span id="ws-pill" class="ws-pill dead">offline</span>
+      <span id="live-pill" class="ws-pill" title="bridge heartbeat: live game vs save-only">save-only</span>
     </div>
   </div>
 </header>
@@ -3827,6 +3828,16 @@ function connectWS() {
           if (label) bridgeToast(tp.endsWith("_error") ? "err" : "bridge", label);
           setTimeout(loadAll, 250);
         }
+        if (m.type === "live_status") {
+          // Bridge heartbeat flipped: live (green) vs save-only (quiet —
+          // game closed is the NORMAL state, so no alarm colour).
+          const p = $("#live-pill");
+          if (p) {
+            p.classList.toggle("live", !!m.live);
+            p.classList.remove("dead");
+            p.textContent = m.live ? "live" : "save-only";
+          }
+        }
         if (m.type === "cart_updated" && m.slot === STATE.slot) {
           CART = m.cart || [];
           updateCartWidget();
@@ -3849,6 +3860,13 @@ async function boot() {
   STATE.saves = await jget("/api/saves").catch(() => []);
   STATE.languages = await jget("/api/languages").catch(() => []);
   if (STATE.saves.length) STATE.slot = STATE.saves[0].slot_id;
+
+  // Initial live-mode pill (bridge heartbeat). 503/no-bridge = save-only,
+  // which is the normal state when the game is closed — stays quiet.
+  jget("/api/bridge/status").then(s => {
+    const p = $("#live-pill");
+    if (p && s && s.live) { p.classList.add("live"); p.textContent = "live"; }
+  }).catch(() => {});
 
   $("#slot").innerHTML = STATE.saves.map(s =>
     `<option value="${esc(s.slot_id)}">${esc(s.label)}</option>`).join("") || '<option>no save</option>';

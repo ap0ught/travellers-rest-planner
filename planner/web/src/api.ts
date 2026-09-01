@@ -84,8 +84,12 @@ export async function shopSell(slot: string, itemId: number, count: number, pric
 
 export async function fetchBridgeStatus(): Promise<any> {
   const r = await fetch(`${API}/api/bridge/status`, { cache: "no-store" });
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  // A 503 (bridge HTTP down) still carries the heartbeat-derived `live` field
+  // (G0) — don't throw it away; heartbeat freshness is the mode authority.
+  const j = await r.json().catch(() => null);
+  if (j && typeof j === "object") return j;
+  if (!r.ok) throw new Error("bridge status unavailable");
+  return j;
 }
 export async function fetchBridgeEvents(): Promise<any> {
   const r = await fetch(`${API}/api/bridge/events`, { cache: "no-store" });
