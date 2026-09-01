@@ -29,8 +29,15 @@ crops   = load_dir("Crop")
 seeds   = load_dir("Seed")
 recipes = load_dir("Recipe")
 foods   = load_dir("Food")
+# Additional item-bearing classes (fuel/kindling, spellbooks, arcane
+# fertilizer, phase/candle items) that share the Item base fields.
+fuels   = load_dir("Fuel")
+spellbooks = load_dir("SpellBook")
+fertilizers = load_dir("MagicFertilizer")
+phase_items = load_dir("PhaseItem")
 
-print(f"items={len(items)} crops={len(crops)} seeds={len(seeds)} recipes={len(recipes)} foods={len(foods)}")
+print(f"items={len(items)} crops={len(crops)} seeds={len(seeds)} recipes={len(recipes)} foods={len(foods)} "
+      f"fuels={len(fuels)} spellbooks={len(spellbooks)} fertilizers={len(fertilizers)} phase_items={len(phase_items)}")
 
 # Master name resolver: PathID -> display name
 name_of = {}
@@ -62,7 +69,7 @@ def seasons(flag):
 
 # ---------- items.json (master) ----------
 master = {}
-for src in (items, foods):
+for src in (items, foods, fuels, spellbooks, fertilizers, phase_items):
     for pid, it in src.items():
         master[pid] = {
             "path_id": pid,

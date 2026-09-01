@@ -53,9 +53,50 @@ DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def saves_root() -> str:
-    return os.path.expandvars(
-        r"%USERPROFILE%\AppData\LocalLow\Louqou\TravellersRest\GameSaves"
-    )
+    # 1. Explicit override
+    env = os.environ.get("TR_SAVES_DIR") or os.environ.get("TRAVELLERS_REST_SAVES")
+    if env and os.path.isdir(env):
+        return env
+    # 2. Native Windows / Wine USERPROFILE location
+    win = os.path.expandvars(r"%USERPROFILE%\AppData\LocalLow\Louqou\TravellersRest\GameSaves")
+    if os.path.isdir(win):
+        return win
+    # 3. Proton compatdata locations (Linux) — check all library folders + default steam paths
+    #    Game is AppID 1139980, currently on /extdrive but may move.
+    #    Probe: libraryfolders.vdf-derived libs + common steam roots
+    import pathlib
+    candidates: list[str] = []
+    # Parse libraryfolders.vdf for compatdata location (same lib as game install)
+    for vdf in [
+        pathlib.Path.home() / ".steam/steam/steamapps/libraryfolders.vdf",
+        pathlib.Path.home() / ".local/share/Steam/steamapps/libraryfolders.vdf",
+        pathlib.Path.home() / ".steam/root/steamapps/libraryfolders.vdf",
+    ]:
+        if vdf.is_file():
+            try:
+                txt = vdf.read_text(encoding="utf-8", errors="ignore")
+                for m in re.finditer(r'"path"\s*"([^"]+)"', txt):
+                    lib = m.group(1).replace("\\\\", "\\")
+                    candidates.append(os.path.join(lib, "steamapps/compatdata/1139980/pfx/drive_c/users/steamuser/AppData/LocalLow/Louqou/TravellersRest/GameSaves"))
+            except Exception:
+                pass
+    # Hard-known fallbacks
+    for base in [
+        os.path.expanduser("~/.steam/steam"),
+        os.path.expanduser("~/.local/share/Steam"),
+        "/extdrive/SteamLibrary",
+        "/mnt/extdrive/SteamLibrary",
+    ]:
+        candidates.append(os.path.join(base, "steamapps/compatdata/1139980/pfx/drive_c/users/steamuser/AppData/LocalLow/Louqou/TravellersRest/GameSaves"))
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    # Fallback: return proton extdrive path if parent exists (for watchdog to create)
+    for c in candidates:
+        parent = os.path.dirname(c)
+        if os.path.isdir(parent):
+            return c
+    return win
 
 
 @dataclass
@@ -67,14 +108,30 @@ class SaveSlot:
     label: str             # human label for the dropdown
 
 
-def discover_slots(root: str | None = None) -> list[SaveSlot]:
+def discover_slots(root: str | None = None, single_file_only: bool = True) -> list[SaveSlot]:
+    """Discover save slots.
+    When single_file_only=True (default), only File_1 is tracked — SaveAnywhere
+    folders are ignored and File_2+ are excluded unless TR_SINGLE_FILE=0.
+    Set single_file_only=False or TR_SINGLE_FILE=0 to rediscover all File_*.
+    """
     root = root or saves_root()
     if not os.path.isdir(root):
         return []
+    # Env override: TR_SINGLE_FILE=0 disables single-file mode
+    if os.environ.get("TR_SINGLE_FILE", "1") == "0":
+        single_file_only = False
+    allowed = ("File_1",) if single_file_only else None
     slots: list[SaveSlot] = []
     for entry in sorted(os.listdir(root)):
         full = os.path.join(root, entry)
-        if not os.path.isdir(full) or not entry.startswith("File_"):
+        # Single-file realtime mode: only File_1; ignore SaveAnywhere entirely
+        if single_file_only:
+            if entry != "File_1":
+                continue
+        else:
+            if not os.path.isdir(full) or not entry.startswith("File_"):
+                continue
+        if not os.path.isdir(full):
             continue
         saves = glob.glob(os.path.join(full, "SaveFile*.save"))
         if not saves:

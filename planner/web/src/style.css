@@ -196,3 +196,64 @@ h2.section {
   font-style: italic;
   font-size: 12px;
 }
+
+/* --- PlannerBridge graphical feedback --- */
+.toast-stack {
+  position: fixed;
+  top: 64px;
+  right: 16px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  min-width: 280px;
+  max-width: 420px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  animation: toast-in 0.28s cubic-bezier(0.34, 1.56, 0.64, 1), toast-out 0.4s ease-in forwards;
+  animation-delay: 0s, 2.8s;
+  border-left: 4px solid;
+}
+.toast.bridge { background: #1a3520; border-color: #4ade80; color: #dcfce7; }
+.toast.save { background: #1e2a3a; border-color: #60a5fa; color: #dbeafe; }
+.toast.error { background: #3a1a1a; border-color: #f87171; color: #fee2e2; }
+@keyframes toast-in { from { transform: translateX(120%) scale(0.96); opacity: 0; } to { transform: translateX(0) scale(1); opacity: 1; } }
+@keyframes toast-out { to { transform: translateX(40%) scale(0.98); opacity: 0; } }
+
+.pulse {
+  animation: pulse-glow 0.9s ease-out;
+}
+@keyframes pulse-glow {
+  0% { box-shadow: 0 0 0 0 rgba(212,165,90,0.7); }
+  100% { box-shadow: 0 0 0 18px rgba(212,165,90,0); }
+}
+.realtime-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #1a3520;
+  color: #4ade80;
+  border: 1px solid #4ade80;
+  animation: realtime-ping 1.6s ease-in-out infinite;
+}
+@keyframes realtime-ping { 0%,100% { opacity: 1; } 50% { opacity: 0.65; } }
+
+.debug-panel {
+  margin: 12px 0;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

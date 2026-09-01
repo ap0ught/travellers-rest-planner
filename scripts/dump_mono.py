@@ -14,6 +14,12 @@ TARGETS = {
     "Item","Food","Seed","SproutSeed","Crop","Recipe","RecipeList",
     "MaterialTypeItem","IngredientGroup","ShopItem","ShopRecipe",
 
+    # Additional item-bearing ScriptableObjects (share the Item base fields:
+    # id/m_Name/nameId/price/sellPrice/icon/...). Without these the game's
+    # fuels, spellbooks, fertilizers and phase items get dropped from the dump
+    # and so never reach the catalog or icon extraction.
+    "Fuel","SpellBook","MagicFertilizer","PhaseItem",
+
     # Living things
     "Animal","AnimalBreeds","AnimalRelationship","Fish","Tree","Bush",
     "BushHarvest","BeersWant",

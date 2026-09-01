@@ -124,6 +124,8 @@ class CookSuggestion:
 class PlantSuggestion:
     crop_id: int
     crop_name: str
+    seed_item_id: int | None
+    seed_name: str | None
     days_to_grow: int
     reusable: bool
     days_until_new_harvest: int
@@ -225,9 +227,16 @@ def _plant_suggestion(crop: Crop, target_week: int, days_until_week: int,
                       is_best: bool, tr: Translator, why: list[str]) -> PlantSuggestion:
     plant_by = max(0, days_until_week - crop.days_to_grow)
     name = tr.crop(crop.name_id, crop.harvest_item_id, crop.name)
+    seed_name = None
+    if crop.seed_item_id:
+        seed_item = tr.item(crop.seed_item_id, None, fallback=str(crop.seed_item_id))
+        # try to get proper name via catalog if available
+        seed_name = seed_item
     return PlantSuggestion(
         crop_id=crop.crop_id,
         crop_name=name,
+        seed_item_id=crop.seed_item_id,
+        seed_name=seed_name,
         days_to_grow=crop.days_to_grow,
         reusable=crop.reusable,
         days_until_new_harvest=crop.days_until_new_harvest,
@@ -244,6 +253,24 @@ def _plant_suggestion(crop: Crop, target_week: int, days_until_week: int,
 def build_plan(state: GameState, cat: Catalog, language: str = DEFAULT_LANG) -> Plan:
     cur_season = state.current_date.season
     tr = Translator(language)
+
+    today_summary = {
+        "date": str(state.current_date),
+        "season": state.current_date.season_name,
+        "year": state.current_date.year,
+        "week_in_season": state.current_date.week,
+        "day_of_week": state.current_date.day_name,
+        "next_trend_rotation_in_days": days_to_week_start(state, 1),
+        "money_copper": state.money_copper,
+        "money_silver": round(state.money_copper / 100, 2),
+        "tavern_rep": state.tavern_rep,
+        "planted_count": sum(state.planted_crop_counts.values()),
+        "unique_planted": len(state.planted_crop_counts),
+        "unlocked_recipes": len(state.unlocked_recipe_ids),
+        "tavern_name": state.tavern_name,
+        "player_name": state.player_name,
+        "item_counts": state.item_counts,
+    }
 
     # Build the 4-week calendar
     calendar: list[WeekPlan] = []
@@ -332,24 +359,6 @@ def build_plan(state: GameState, cat: Catalog, language: str = DEFAULT_LANG) -> 
     # Sort cook suggestions by trend-boosted profit per hour
     cook_now.sort(key=lambda c: -(c.base_profit_with_trend / max(c.time_hours, 0.01)))
     brew_now.sort(key=lambda c: -(c.base_profit_with_trend / max(c.time_hours, 0.01)))
-
-    today_summary = {
-        "date": str(state.current_date),
-        "season": state.current_date.season_name,
-        "year": state.current_date.year,
-        "week_in_season": state.current_date.week,
-        "day_of_week": state.current_date.day_name,
-        "next_trend_rotation_in_days": days_to_week_start(state, 1),
-        "money_copper": state.money_copper,
-        "money_silver": round(state.money_copper / 100, 2),
-        "tavern_rep": state.tavern_rep,
-        "planted_count": sum(state.planted_crop_counts.values()),
-        "unique_planted": len(state.planted_crop_counts),
-        "unlocked_recipes": len(state.unlocked_recipe_ids),
-        "tavern_name": state.tavern_name,
-        "player_name": state.player_name,
-        "item_counts": state.item_counts,
-    }
 
     # Convert state to a serializable dict
     state_dict = {

@@ -32,7 +32,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT  = os.path.join(ROOT, "data", "icons")
 os.makedirs(OUT, exist_ok=True)
 
-ITEM_CLASSES = ("Item", "Food", "Seed", "SproutSeed", "Fish")
+ITEM_CLASSES = ("Item", "Food", "Seed", "SproutSeed", "Fish",
+                "Fuel", "SpellBook", "MagicFertilizer", "PhaseItem")
 
 
 def make_generator():

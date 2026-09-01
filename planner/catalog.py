@@ -204,12 +204,21 @@ def load_catalog() -> Catalog:
     crops_raw = _load_dir("Crop")
     recipes_raw = _load_dir("Recipe")
     groups_raw = _load_dir("IngredientGroup")
+    fuels_raw = _load_dir("Fuel")
+    spellbooks_raw = _load_dir("SpellBook")
+    fertilizers_raw = _load_dir("MagicFertilizer")
+    phase_items_raw = _load_dir("PhaseItem")
 
     cat = Catalog()
 
-    # Items + Foods + Seeds + SproutSeeds all inherit from Item base
+    # Items + Foods + Seeds + SproutSeeds all inherit from Item base.
+    # Fuel/SpellBook/MagicFertilizer/PhaseItem also store the same core fields
+    # (id/m_Name/nameId/price/sellPrice/icon) even though they're separate
+    # ScriptableObject subclasses, so fold them in as non-food items too.
     for src, is_food in ((items_raw, False), (foods_raw, True),
-                         (seeds_raw, True), (sprout_seeds_raw, True)):
+                         (seeds_raw, True), (sprout_seeds_raw, True),
+                         (fuels_raw, False), (spellbooks_raw, False),
+                         (fertilizers_raw, False), (phase_items_raw, False)):
         for pid, d in src.items():
             iid = d.get("id")
             if iid is None:

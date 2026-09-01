@@ -75,3 +75,7 @@ scripts/fix_csproj.py
 scripts/trainer.py
 scripts/savepatch.py
 resolve
+
+# ── IDE / build artifacts ──────────────────────────────────
+*.iml
+*.tsbuildinfo

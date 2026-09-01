@@ -20,6 +20,9 @@ export type Today = {
   planted_count: number;
   unique_planted: number;
   unlocked_recipes: number;
+  tavern_name: string;
+  player_name: string;
+  item_counts: Record<string, number>;
 };
 
 export type TrendItem = {
@@ -55,6 +58,8 @@ export type CookSuggestion = {
 export type PlantSuggestion = {
   crop_id: number;
   crop_name: string;
+  seed_item_id: number | null;
+  seed_name: string | null;
   days_to_grow: number;
   reusable: boolean;
   days_until_new_harvest: number;
