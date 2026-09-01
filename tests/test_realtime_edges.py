@@ -40,7 +40,7 @@ def test_copper_silver_overflow_carries():
 
 
 def test_negative_copper_clamp_would_be_zero():
-    # planner clamps negative to 0 before patch, verify math
+    # bridge clamps negative money to 0; verify the math
     assert max(0, to_copper(0, 0, 0) - 500) == 0
 
 

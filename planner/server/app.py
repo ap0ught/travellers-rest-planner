@@ -31,7 +31,6 @@ from planner.i18n import available_languages, DEFAULT_LANG
 from planner.parser.saves import (
     discover_slots, get_slot, parse_save, extract, saves_root, latest_save_in_folder,
 )
-import struct
 from planner.plan.engine import build_plan, plan_to_dict
 from planner.plan.brewing import all_brew_plans, build_brew_plan
 from planner.plan.brew_planner import build_brew_plan_view
@@ -903,152 +902,6 @@ async def api_menu_update(data: dict):
     return _menus.get(sid, [])
 
 
-def _locate_money_offset(save_path: str) -> int | None:
-    """Return file offset of the SaveData.money Int32 by instrumenting NRBF parsing."""
-    import pypdn.nrbf as nrbf_mod
-    orig = nrbf_mod.NRBF._readClassMembers
-    found: dict[str, int] = {}
-
-    def hooked(self2, obj, objectID, libraryID=None):
-        fields = getattr(obj, '_fields', None)
-        if fields and 'money' in fields:
-            try:
-                money_idx = fields.index('money')
-                orig_prim = self2._readPrimitive
-                def cap_prim(pt):
-                    idx = getattr(self2, '_cheat_idx', -1)
-                    if idx == money_idx and 'pos' not in found:
-                        found['pos'] = self2.stream.tell()
-                    return orig_prim(pt)
-                self2._readPrimitive = cap_prim
-                index = 0
-                while index < len(obj._fields):
-                    self2._cheat_idx = index
-                    if obj._typeInfo is None:
-                        binaryType, additionalInfo = nrbf_mod.BinaryType.Object, None
-                    else:
-                        binaryType, additionalInfo = obj._typeInfo[index]
-                    if binaryType == nrbf_mod.BinaryType.Primitive:
-                        value = self2._readPrimitive(additionalInfo)
-                    else:
-                        value = self2._readRecord()
-                        if isinstance(value, nrbf_mod.BinaryLibrary):
-                            continue
-                        elif isinstance(value, nrbf_mod.ObjectNullMultiple):
-                            index += value.count
-                            continue
-                        elif isinstance(value, nrbf_mod.Reference):
-                            value.parent = obj
-                            value.indexInParent = index
-                    obj[index] = value
-                    index += 1
-                self2._readPrimitive = orig_prim
-                if hasattr(self2, '_cheat_idx'):
-                    del self2._cheat_idx
-                if getattr(obj.__class__, '_isSystemClass', False):
-                    for name, resolver in self2._collectionResolvers:
-                        if obj.__class__.__name__.startswith('System_Collections_Generic_%s_' % name):
-                            obj2 = nrbf_mod.Reference(objectID, collectionResolver=resolver, originalObj=obj)
-                            self2._collectionReferences.append(obj2)
-                            break
-                self2.objectsByID[objectID] = obj
-                if libraryID:
-                    self2.binaryLibraries[libraryID].objects[objectID] = obj
-                return obj
-            except Exception:
-                self2._readPrimitive = getattr(self2, '_readPrimitive', orig_prim) if 'orig_prim' in locals() else self2._readPrimitive
-                return orig(self2, obj, objectID, libraryID)
-        else:
-            return orig(self2, obj, objectID, libraryID)
-    nrbf_mod.NRBF._readClassMembers = hooked
-    try:
-        from pypdn.nrbf import NRBF
-        n = NRBF(filename=save_path)
-        n.resolveReferences()
-        return found.get('pos')
-    except Exception:
-        return None
-    finally:
-        nrbf_mod.NRBF._readClassMembers = orig
-
-
-def _locate_inventory_offset(save_path: str, item_id: int) -> int | None:
-    """Return file offset of an item Int32 stack by instrumenting NRBF parsing."""
-    import urllib.request, json as _j
-    # Try common inventory field names based on the parser's extract logic
-    field_names = (
-        "itemsInInventory", "itemsInInventory2", "itemsInInventory3",
-        "itemsInBuildingInventory", "orderBox", "itemsInActionBar",
-    )
-    orig = __import__('pypdn.nrbf', fromlist=['NRBF']).NRBF._readClassMembers
-    found: dict[str, int] = {}
-
-    def hooked(self2, obj, objectID, libraryID=None):
-        fields = getattr(obj, '_fields', None)
-        if fields is None:
-            return orig(self2, obj, objectID, libraryID)
-        for fname in field_names:
-            if fname in fields:
-                try:
-                    idx = fields.index(fname)
-                    orig_prim = self2._readPrimitive
-                    def cap_prim(pt):
-                        idx2 = getattr(self2, '_cheat_idx', -1)
-                        if idx2 == idx and 'pos' not in found:
-                            found['pos'] = self2.stream.tell()
-                        return orig_prim(pt)
-                    self2._readPrimitive = cap_prim
-                    index = 0
-                    while index < len(obj._fields):
-                        self2._cheat_idx = index
-                        if obj._typeInfo is None:
-                            binaryType, additionalInfo = __import__('pypdn.nrbf', fromlist=['BinaryType']).BinaryType.Object, None
-                        else:
-                            binaryType, additionalInfo = obj._typeInfo[index] if hasattr(obj, '_typeInfo') and obj._typeInfo else (None, None)
-                        if binaryType == __import__('pypdn.nrbf', fromlist=['BinaryType']).BinaryType.Primitive:
-                            value = self2._readPrimitive(additionalInfo)
-                        else:
-                            value = self2._readRecord()
-                            if isinstance(value, __import__('pypdn.nrbf', fromlist=['BinaryLibrary']).BinaryLibrary):
-                                continue
-                            elif isinstance(value, __import__('pypdn.nrbf', fromlist=['BinaryLibrary']).ObjectNullMultiple):
-                                index += value.count
-                                continue
-                            elif isinstance(value, __import__('pypdn.nrbf', fromlist=['Reference']).Reference):
-                                value.parent = obj
-                                value.indexInParent = index
-                        obj[index] = value
-                        index += 1
-                    self2._readPrimitive = orig_prim
-                    if hasattr(self2, '_cheat_idx'):
-                        del self2._cheat_idx
-                    if getattr(obj.__class__, '_isSystemClass', False):
-                        for name, resolver in self2._collectionResolvers:
-                            if obj.__class__.__name__.startswith('System_Collections_Generic_%s_' % name):
-                                obj2 = __import__('pypdn.nrbf', fromlist=['Reference']).Reference(objectID, collectionResolver=resolver, originalObj=obj)
-                                self2._collectionReferences.append(obj2)
-                                break
-                    self2.objectsByID[objectID] = obj
-                    if libraryID:
-                        self2.binaryLibraries[libraryID].objects[objectID] = obj
-                    return obj
-                except Exception:
-                    self2._readPrimitive = getattr(self2, '_readPrimitive', orig_prim) if 'orig_prim' in locals() else self2._readPrimitive
-                    return orig(self2, obj, objectID, libraryID)
-        else:
-            return orig(self2, obj, objectID, libraryID)
-    __import__('pypdn.nrbf', fromlist=['NRBF']).NRBF._readClassMembers = hooked
-    try:
-        from pypdn.nrbf import NRBF
-        n = NRBF(filename=save_path)
-        n.resolveReferences()
-        return found.get('pos')
-    except Exception:
-        return None
-    finally:
-        __import__('pypdn.nrbf', fromlist=['NRBF']).NRBF._readClassMembers = orig
-
-
 async def _try_bridge(path: str, payload: dict, timeout: float = 3.5):
     """Try BepInEx bridge on 8766, return json or None if not running.
     Timeout 3.5s so SyncOnMainThread (2.5-3s) can complete and return actual
@@ -1081,7 +934,7 @@ async def _try_bridge(path: str, payload: dict, timeout: float = 3.5):
 
 @app.post("/api/cheat/money")
 async def api_cheat_money(data: dict):
-    """Realtime via BepInEx bridge if running, else binary patch (requires Reload). 1g=10000c."""
+    """Set/add money via the in-game bridge (1g = 10000c). Refuses if the bridge is offline."""
     # Try realtime bridge first
     try:
         copper = int(data.get("copper", data.get("amount", 0)))
@@ -1118,56 +971,20 @@ async def api_cheat_money(data: dict):
     except Exception:
         pass
 
-    # Fallback: binary patch save file (requires Load)
-    slot_id = str(data.get("slot") or data.get("slot_id") or "").strip() or None
-    slot = get_slot(slot_id)
-    if not slot:
-        return JSONResponse({"error": "no save slot (bridge not running and no save found)"}, status_code=404)
-    latest = latest_save_in_folder(slot.folder) or slot.latest_file
-    if not latest or not os.path.isfile(latest):
-        return JSONResponse({"error": "save file not found"}, status_code=404)
-    if copper < 0: copper = 0
-    if copper > 2_147_483_647: copper = 2_147_483_647
-    if action == "add":
-        try:
-            state = _load_state_for(slot.slot_id)
-            copper = (state.money_copper if state else 0) + copper
-        except Exception:
-            pass
-        copper = max(0, min(copper, 2_147_483_647))
-    off = _locate_money_offset(latest)
-    if off is None:
-        return JSONResponse({"error": "could not locate money field (unsupported save version)"}, status_code=500)
-    try:
-        with open(latest, "r+b") as f:
-            f.seek(off)
-            before = int.from_bytes(f.read(4), "little", signed=True)
-            f.seek(off)
-            f.write(struct.pack("<i", copper))
-        bak = os.path.join(slot.folder, "Save.backup")
-        if os.path.isfile(bak):
-            try:
-                off2 = _locate_money_offset(bak)
-                if off2 is not None:
-                    with open(bak, "r+b") as f:
-                        f.seek(off2)
-                        f.write(struct.pack("<i", copper))
-            except Exception:
-                pass
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return JSONResponse({"error": f"write failed: {e}"}, status_code=500)
-    await manager.broadcast({"type": "save_changed", "path": latest})
-    try:
-        new_state = _load_state_for(slot.slot_id)
-        return {"bridge": False, "realtime": False, "slot_id": slot.slot_id, "save_path": latest, "offset": hex(off), "before_copper": before, "copper": copper, "gold": copper/10000, "money_copper": new_state.money_copper if new_state else copper, "hint": "Load Game in TR to see"}
-    except Exception:
-        return {"bridge": False, "slot_id": slot.slot_id, "save_path": latest, "offset": hex(off), "before_copper": before, "copper": copper}
+    # Bridge not running → refuse. The planner NEVER mutates the game through
+    # the save file; the in-game bridge is the only write channel to live state.
+    return JSONResponse(
+        {
+            "error": "game not running — PlannerBridge offline; cannot mutate live state. Start the game with the PlannerBridge plugin, or use save-only read mode.",
+            "bridge": False,
+        },
+        status_code=503,
+    )
 
 
 @app.post("/api/cheat/seed")
 async def api_cheat_seed(data: dict):
-    """Realtime add seeds via BepInEx bridge (no Load needed). Now sync — returns actual result."""
+    """Add seeds via the in-game bridge (sync). Refuses if the bridge is offline."""
     try:
         item_id = int(data.get("itemId", data.get("item_id", data.get("seedId", 0))))
         count = int(data.get("count", data.get("amount", data.get("qty", 10))))
@@ -1188,44 +1005,20 @@ async def api_cheat_seed(data: dict):
         # 202 queued
         if bridged.get("queued"):
             return {"bridge": True, "realtime": True, "queued": True, **bridged}
-    # Bridge offline — attempt save-file patch fallback (same approach as money cheat)
-    try:
-        slot_id = str(data.get("slot") or data.get("slot_id") or "").strip() or None
-        slot = get_slot(slot_id)
-        if not slot:
-            return JSONResponse({"error": "no save slot (bridge not running and no save found)"}, status_code=404)
-        latest = latest_save_in_folder(slot.folder) or slot.latest_file
-        if not latest or not os.path.isfile(latest):
-            return JSONResponse({"error": "save file not found"}, status_code=404)
-        off = _locate_inventory_offset(latest, item_id)
-        if off is None:
-            return JSONResponse({"error": "could not locate item field in save (unsupported save version)"}, status_code=500)
-        try:
-            with open(latest, "r+b") as f:
-                f.seek(off)
-                before = int.from_bytes(f.read(4), "little", signed=True)
-                f.seek(off)
-                # Read current stack, add delta, clamp to [1, 999]
-                current_stack = before if before > 0 else 0
-                new_stack = max(1, min(999, current_stack + count))
-                f.write(struct.pack("<i", new_stack))
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            return JSONResponse({"error": f"write failed: {e}"}, status_code=500)
-        await manager.broadcast({"type": "save_changed", "path": latest})
-        try:
-            new_state = _load_state_for(slot.slot_id)
-            return {"bridge": False, "realtime": False, "slot_id": slot.slot_id, "save_path": latest, "offset": hex(off), "before_stack": before, "after_stack": new_stack, "count_added": count, "money_copper": new_state.money_copper if new_state else 0, "hint": "Load Game in TR to see"}
-        except Exception:
-            return {"bridge": False, "slot_id": slot.slot_id, "save_path": latest, "offset": hex(off), "before_stack": before, "after_stack": new_stack, "count_added": count}
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return JSONResponse({"error": f"save patch failed: {e}"}, status_code=500)
+    # Bridge not running → refuse. The planner NEVER mutates the game through
+    # the save file; the in-game bridge is the only write channel to live state.
+    return JSONResponse(
+        {
+            "error": "game not running — PlannerBridge offline; cannot mutate live state. Start the game with the PlannerBridge plugin, or use save-only read mode.",
+            "bridge": False,
+        },
+        status_code=503,
+    )
 
 
 @app.post("/api/shop/buy")
 async def api_shop_buy(data: dict):
-    """Remote buy: add item to inventory and subtract money. Now sync — buy feels like gold cheat (same latency, same error surface)."""
+    """Remote buy: add item to inventory and subtract money via the in-game bridge. Refuses if the bridge is offline."""
     try:
         item_id = int(data.get("itemId", data.get("item_id", 0)))
         count = int(data.get("count", 1))
@@ -1245,12 +1038,20 @@ async def api_shop_buy(data: dict):
             err = bridged.get("error") or bridged.get("result") or "bridge buy failed"
             # Mirror gold cheat UX: show why money/inventory failed (e.g., need X have Y, or load save)
             return JSONResponse({"error": f"buy failed: {err}", "bridge": True, "detail": bridged}, status_code=status)
-    return JSONResponse({"error": "bridge not running - restart TR with BepInEx PlannerBridge for realtime buy (no store walk).", "bridge": False}, status_code=503)
+    # Bridge not running → refuse. The planner NEVER mutates the game through
+    # the save file; the in-game bridge is the only write channel to live state.
+    return JSONResponse(
+        {
+            "error": "game not running — PlannerBridge offline; cannot mutate live state. Start the game with the PlannerBridge plugin, or use save-only read mode.",
+            "bridge": False,
+        },
+        status_code=503,
+    )
 
 
 @app.post("/api/shop/sell")
 async def api_shop_sell(data: dict):
-    """Remote sell: remove item and add money (realtime if bridge). Sync like buy."""
+    """Remote sell: remove item and add money via the in-game bridge. Refuses if the bridge is offline."""
     try:
         item_id = int(data.get("itemId", data.get("item_id", 0)))
         count = int(data.get("count", 1))
@@ -1269,7 +1070,15 @@ async def api_shop_sell(data: dict):
         if status >= 400:
             err = bridged.get("error") or bridged.get("result") or "bridge sell failed"
             return JSONResponse({"error": f"sell failed: {err}", "bridge": True, "detail": bridged}, status_code=status)
-    return JSONResponse({"error": "bridge not running - restart TR with BepInEx PlannerBridge for realtime sell.", "bridge": False}, status_code=503)
+    # Bridge not running → refuse. The planner NEVER mutates the game through
+    # the save file; the in-game bridge is the only write channel to live state.
+    return JSONResponse(
+        {
+            "error": "game not running — PlannerBridge offline; cannot mutate live state. Start the game with the PlannerBridge plugin, or use save-only read mode.",
+            "bridge": False,
+        },
+        status_code=503,
+    )
 
 
 # ---------- Bridge -> planner feedback (graphical realtime) -----------------
