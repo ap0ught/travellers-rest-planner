@@ -1,0 +1,199 @@
+# Gap Analysis: the perfect vision vs TRP reality
+
+Companion to [`HOW_TO_REPLICATE_FOR_ANOTHER_GAME.md`](HOW_TO_REPLICATE_FOR_ANOTHER_GAME.md)
+(the "perfect vision"). This document holds the current implementation
+accountable to that vision: each entry is an issue-ready gap — **ID, vision,
+current, impact, effort, depends-on, affected files** — to be expanded into
+GitHub issues and fixed. Dated 2026-09-01; update statuses as work lands.
+
+Effort scale: **S** hours, **M** days, **L** week+.
+
+---
+
+## 1. The component contract (roles each part must own)
+
+| Component | Role | Owns | Must NOT |
+|---|---|---|---|
+| **Planner** (FastAPI + web UI) | Knowledge base + state owner. Knows all data & game assets via the startup dump scripts. Computes every diff. Robust, never fragile. | Save parsing (read-only), catalog/assets, plan engine, live-vs-save diff, UI, mode state | Mutate the game through the save file; duplicate bridge responsibilities; crash when the bridge/game disappears |
+| **Bridge** (BepInEx plugin, in-game) | Thin live-state reporter + the ONLY mutation channel into the running game. Raw IDs/counts only. | Heartbeat, verified live reads, mutations with before/after verification, event push, planner process spawn/supervision | Duplicate item names/catalog/asset knowledge (IDs only); act as source of truth |
+| **Save file** | Durable truth, written by the game alone | Persistence checkpoints | Being written to by the planner (read-only to the planner) |
+
+**Design invariants:**
+1. Never mutate the game through the save file. The bridge is the only write
+   channel to live state.
+2. The bridge reports raw IDs and counts; the planner resolves them to names
+   via its own extracted catalog. (Verified already true today.)
+3. Every mutation returns the verified value **before** and **after** the
+   change — never trust `"ok"` alone.
+4. The planner is the non-fragile side: heartbeat loss degrades it to
+   save-only read mode; it never needs the bridge to survive.
+
+## 2. The lifecycle & truth model
+
+The bridge lives inside the game process, so it inherently knows whether the
+game is up — it (not the planner) is the liveness authority.
+
+**Launch modes:**
+1. **Open the game → bridge spawns the planner** → LIVE mode from birth.
+   Bridge is parent; owns supervision (restart planner if it dies).
+2. **Open the planner standalone (game not running)** → SAVE-ONLY read mode.
+   The save file is the most current game data. Normal state, no warning.
+3. **Game already running, planner opened standalone** → planner sees the
+   bridge heartbeat arriving and promotes itself to LIVE.
+
+**Liveness protocol (heartbeat):** the bridge posts a periodic heartbeat to
+the planner (`:8765`); the planner derives "live" purely from heartbeat
+presence — first heartbeat → live; heartbeat timeout → drop to save-only
+gracefully. No heartbeat has never existed yet (see G0).
+
+**State matrix:**
+
+| Game | Bridge/heartbeat | Planner mode | UI shows |
+|---|---|---|---|
+| down | absent | save-only (normal) | "saved as of HH:MM" |
+| up | up | live | green ● live |
+| up | down (bridge crashed) | error/degraded | loud flag — bridge should be up whenever the game is |
+
+---
+
+## 3. Resolved gaps (fixed 2026-09-01)
+
+### MUT-1 — Planner mutated the game via save-file byte-patching ✅
+- **Was:** `/api/cheat/money` and `/api/cheat/seed` fell back to binary-patching
+  the `.save` (and `.backup`) via NRBF-offset instrumentation
+  (`_locate_money_offset`, `_locate_inventory_offset`) when the bridge was
+  offline — ~230 lines of version-sensitive mutation code that violated the
+  role contract.
+- **Root cause of the failing live-seed test:** the planner patched the save
+  on disk instead of going through the bridge, so the *running game* never
+  saw the change and the verified read-back failed.
+- **Fix:** planner commit `308fe1a` — removed both fallbacks and the dead
+  helpers; all four write endpoints (`cheat/money`, `cheat/seed`,
+  `shop/buy`, `shop/sell`) now uniformly refuse with 503
+  *"game not running — PlannerBridge offline; cannot mutate live state."*
+- **Reproduce (historical):** with the game+bridge running,
+  `pytest tests/test_live_seed_happy_path.py -v -s` — the happy path added a
+  seed through the planner, then failed the live read-back because the
+  mutation diverted to the save-patch path. Now the only path is
+  planner → bridge → game, with verified before/after (MUT-2).
+
+### MUT-2 — Mutations returned no verified before/after; no targeted read ✅ (bridge side)
+- **Was:** bridge mutation endpoints returned only `{"ok":true,...}` — no
+  before/after state — and the only live read was the full `/debug/inventory`
+  snapshot.
+- **Fix:** bridge commit `7263cd4` — every mutation
+  (`addItem`, `addMoney`, `shop/buy`, `shop/sell`) now reads the verified live
+  state immediately before and after the change (same serialized block) and
+  returns `before`/`after` in both the HTTP response and the pushed
+  `bridge_event`; `-1` = could not verify. New `GET /value?itemId=N[&money=1]`
+  targeted verified read ("how many of X right now?").
+- **Still open:** planner/UI consumption — see HB-1 (badge on verified
+  before/after) and the UI bridge_event gap (EV-1).
+
+---
+
+## 4. Open gaps (issue-ready)
+
+### G0 — No bridge-owned lifecycle: no heartbeat, bridge doesn't spawn the planner
+- **Vision:** launch modes 1–3 above; bridge heartbeats to `:8765`; bridge
+  `Process.Start`s (and supervises) the planner when the game opens;
+  planner derives mode from heartbeat presence.
+- **Current:** planner and bridge are independent processes that find each
+  other via opportunistic per-request HTTP polls
+  (`_fetch_live_bridge_counts` at `app.py:~280`, timeout 0.8s). No heartbeat
+  exists on either side. Bridge has no spawn/supervision code
+  (`System.Diagnostics` imported, unused). Planner has no mode concept at all.
+- **Impact:** root gap — the state matrix is unknowable, which blocks correct
+  mode badges, degraded-state flags, and the since-last-save tracker.
+- **Effort:** **L**. **Depends-on:** —. **Blocks:** G1, LV-1, SLS-1, DEG-1, TST-1.
+- **Files:** bridge `Plugin.cs` (heartbeat thread + Process.Start +
+  supervision), planner `app.py` (heartbeat listener + mode state +
+  `live_status` broadcast), `__main__.py` (mode flag).
+
+### G1 — No planner mode concept; no `live_status` over the WebSocket
+- **Vision:** planner tracks LIVE vs SAVE-ONLY mode (heartbeat-derived) and
+  broadcasts `live_status` on `/ws` on every transition; UI mode badge flips
+  without reload.
+- **Current:** no mode anywhere; `/ws` messages are only `save_changed`,
+  `cart_updated`, `menu_updated`, `bridge_event`; `#ws-pill` tracks only the
+  websocket connection itself.
+- **Effort:** **M**. **Depends-on:** G0.
+- **Files:** `planner/server/app.py`, `planner/server/static.py`.
+
+### LV-1 — Live-vs-save provenance only on inventory; UI never renders it
+- **Vision:** every number that differs between live and save carries a
+  source badge (live / saved-as-of / ⚠ not saved yet, `save_count` tooltip).
+- **Current:** `live`/`changed`/`slot_live`/`live_available` are emitted only
+  by `/api/state` + `/api/inventory/grouped` (`app.py:~386-427`); no
+  provenance on `/api/plan` etc.; frontend renders no source badges (all
+  `.badge` CSS is gameplay badges).
+- **Effort:** **L** (thread provenance model → plan → `plan_to_dict` → UI).
+  **Depends-on:** G0, G1 (mode classification drives the badge).
+- **Files:** `planner/server/app.py`, `planner/plan/engine.py`,
+  `planner/server/static.py`.
+
+### SLS-1 — "Since last save" tracker absent (the feature that justifies live mode)
+- **Vision:** snapshot `GameState` on every `save_changed`; accumulate bridge
+  deltas (now carrying verified before/after) between saves; render "things
+  completed since your last save." High value because TR only persists on
+  sleep — quitting mid-day loses a session of progress this would surface.
+- **Current:** nothing exists — no baseline snapshot, no delta log, no
+  endpoint, no UI.
+- **Effort:** **L**. **Depends-on:** G0, G1, EV-1 (deltas arrive as bridge
+  events).
+- **Files:** `planner/server/app.py` (new), `planner/server/static.py`.
+
+### EV-1 — `bridge_event` broadcasts are dropped by the frontend
+- **Vision:** bridge actions pulse the UI sub-second: toast + optimistic
+  count flash from the event's verified `before`/`after`, then the save
+  watcher confirms.
+- **Current:** backend rebroadcasts `bridge_event` (`/api/bridge/push` →
+  `/ws`), but `connectWS` in `static.py:~3759-3772` handles only
+  `save_changed`/`cart_updated`/`menu_updated` — every `bridge_event` is
+  silently ignored. Quick win.
+- **Effort:** **S**. **Depends-on:** —.
+- **Files:** `planner/server/static.py`.
+
+### SEC-1 — `SHARE_TOKEN` generated but never enforced
+- **Vision:** when sharing over LAN/ngrok, write endpoints require a token so
+  guests can't mutate live state / spend money uninvited.
+- **Current:** `SHARE_TOKEN = _secrets.token_urlsafe(16)` at `app.py:~198`
+  is generated and never referenced again; CORS allow-list is the only guard.
+- **Effort:** **M** (token gate on `/api/cheat/*`, `/api/shop/*`,
+  `/api/bridge/push`; propagate to share URL; UI sends header).
+- **Files:** `planner/server/app.py`, `planner/server/static.py`.
+- **Note:** with MUT-1 landed, an unauthenticated writer can now only reach
+  the bridge (game must be running), but `/api/bridge/push` spoofing and
+  remote cheat writes still need the gate.
+
+### DEG-1 — Degraded state not surfaced (bridge down while game up)
+- **Vision:** state matrix row 3 — a loud, explicit "bridge should be up"
+  error, distinct from the normal save-only state.
+- **Current:** silently falls back to save data regardless of why the bridge
+  is absent; user is never told. Structurally mostly solved by G0 (mode is
+  knowable from heartbeat + launch parent), leaving the surfaced message.
+- **Effort:** **S/M**. **Depends-on:** G0, G1.
+- **Files:** `planner/server/app.py`, `planner/server/static.py`.
+
+### TST-1 — No tests for the new contracts
+- **Vision:** tests for heartbeat/mode transitions, before/after verification
+  pass-through, `bridge_event` routing, `live_status` broadcast, token gate —
+  each auto-skipping when the game/bridge is absent (pattern already used by
+  `test_live_seed_happy_path.py`).
+- **Current:** 83 passing tests cover catalog/currency/parser/math/API, but
+  nothing for the above; the live seed happy-path test needs updating for the
+  new before/after response shape.
+- **Effort:** **M**. **Depends-on:** G0, G1, EV-1, SEC-1.
+- **Files:** `tests/` (new), `tests/test_live_seed_happy_path.py` (update).
+
+---
+
+## 5. Suggested triage order
+
+1. **EV-1** (S) — quick win; makes MUT-2's before/after visible in the UI.
+2. **SEC-1** (M) — sharing is exposed today.
+3. **G0** (L) — heartbeat + bridge-spawns-planner; unlocks everything below.
+4. **G1** (M) → **DEG-1** (S/M) — mode + status badge + degraded flag.
+5. **LV-1** (L) — provenance badges everywhere.
+6. **SLS-1** (L) — since-last-save tracker.
+7. **TST-1** (M) — lock it all in.

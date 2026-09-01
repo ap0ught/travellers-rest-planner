@@ -317,10 +317,15 @@ state and actions to the planner, which runs on the same machine (`8765`).
 **Its HTTP API (planner ↔ bridge contract):**
 - **Health/status:** `GET /ping`, `GET /status` (alias `/bridge/status`).
 - **Live reads:** `GET /bridge/inventory` (alias `/debug/inventory`),
-  `/bridge/state`, `/bridge/events`, `/bridge/methods`.
+  `/bridge/state`, `/bridge/events`, `/bridge/methods`, and a targeted
+  verified read `GET /value?itemId=N` ("how many of X right now?",
+  `-1` = can't verify).
 - **Actions (write):** `POST /addItem` (alias `/addSeed`,
   `{itemId,count}` — also `item_id`/`seedId`, `amount`/`qty`, or query params),
-  `POST /money`, `POST /shop/buy`, `POST /shop/sell`.
+  `POST /money`, `POST /shop/buy`, `POST /shop/sell`. **Every mutation returns
+  the verified live value before AND after the change** (read in the same
+  serialized block as the mutation), in both the HTTP response and the pushed
+  event — e.g. `{"ok":true,"itemId":123,"count":5,"before":2,"after":7}`.
 - **Debug:** `GET /debug/toggle`, `GET /debug/clear`.
 - It also keeps an in-memory ring buffer of `BridgeEvent`s and fires
   `NotifyPlannerApp(event)` which `POST`s to the planner's
@@ -339,7 +344,11 @@ run game method calls **directly on the HTTP worker thread**, serialized with a
 **Bridge↔planner division of labor (see also "two live-update mechanisms"):**
 the planner polls the bridge for live counts and merges them over the save view;
 the bridge pushes events to the planner's `/api/bridge/push` for sub-second UI
-feedback; write actions flow planner → bridge → game. The planner ALWAYS treats
+feedback; writes flow planner → bridge → game — **the bridge is the ONLY
+mutation channel; the save file is read-only to the planner** (when the bridge
+is offline, write endpoints refuse rather than patch the save). The bridge
+reports **raw item IDs and counts only** — no names, no catalog — and the
+planner resolves IDs through its own extracted data. The planner ALWAYS treats
 the save parse as truth and the bridge as the fast hint / live delta.
 
 ### Security (a live save reader exposes real player state — treat it like a dossier)
@@ -352,9 +361,13 @@ and can even *write* to it (cheat/buy/sell). That's sensitive, so gate it:
   specific LAN/tunnel URL being served) — the repo builds `_allowed_origins`
   from the running host/port (`app.py:198-207`), not a wildcard.
 - **Put an auth token in front of share mode.** The repo generates a
-  `SHARE_TOKEN` (random, per-run — `app.py:198`) for exactly this; require it
-  on shared/tunneled connections so a public ngrok link isn't an open door to
-  someone's save file. (Verify it's actually enforced — see the open note below.)
+  `SHARE_TOKEN` (random, per-run — `app.py:198`) intended for exactly this —
+  but as of writing it is **generated and not yet enforced** on any endpoint;
+  the CORS allow-list is the only active guard (tracked as gap `SEC-1` in
+  [`GAP_ANALYSIS_2026-09-01.md`](GAP_ANALYSIS_2026-09-01.md)). When you
+  replicate: require the token on write endpoints (`/api/cheat/*`,
+  `/api/shop/*`, `/api/bridge/push`) for shared/tunneled connections so a
+  public ngrok link isn't an open door to someone's game.
 - **Only the read endpoints are harmless to share; gate the write endpoints**
   (`/api/cheat/*`, `/api/shop/*`) so random viewers can't mutate the host's game.
 
@@ -384,7 +397,7 @@ they solve different problems and work best *together*:
 | Latency | When the game writes a save (often seconds apart) | `<200 ms` — near-instant |
 | Data | **Authoritative, full `GameState`** (everything: money, date, trends, crops, quests, inventory) — re-parsed from the whole save | **Small deltas / live counts** — e.g. just the current inventory counts for player 1, or "item X granted" |
 | Cost | Cheap (one parse per save) | Requires a game mod (BepInEx + Harmony) and a **stable** plugin |
-| Failure mode | Works even with zero mods; just has to wait for an autosave | If the plugin/bridge goes offline, it silently degrades |
+| Failure mode | Works even with zero mods; just has to wait for an autosave | If the bridge is down **while the game is up**, that's an *error* to surface loudly; if the game is closed, save-only is the *normal* state |
 
 **In this repo the two are wired together** (see `planner/server/app.py`):
 
@@ -395,10 +408,15 @@ they solve different problems and work best *together*:
 2. **Low-latency live reads = bridge.** The planner *polls* the bridge for live
    inventory/money and **merges** those counts into the read so buy/sell shows up
    *instantly* as graphical feedback, before the autosave even lands on disk
-   (`_fetch_live_bridge_counts` → merged at `app.py:371`). If the bridge is
-   down, it falls back to the save file.
-3. **Writes + events = bridge.** Money/seed/shop modifications go to the bridge
-   for realtime effect (`/api/cheat/*`, `/api/shop/buy|sell`); the bridge can
+   (`_fetch_live_bridge_counts` → merged at `app.py:371`). No bridge + game
+   closed → normal save-only mode. No bridge + game running → degraded state
+   that should be flagged, not hidden.
+3. **Writes = bridge, exclusively.** Money/seed/shop modifications go to the
+   bridge for realtime effect (`/api/cheat/*`, `/api/shop/buy|sell`) and the
+   bridge answers with the **verified value before and after** the change —
+   never trust `"ok"` alone. When the bridge is offline these endpoints
+   *refuse* (503 "game not running — cannot mutate live state"); the planner
+   **never** falls back to editing the save file. The bridge can also
    `POST /api/bridge/push`, which the planner rebroadcasts as `bridge_event`
    over `/ws` for <200 ms UI feedback (`app.py:80-81, 1275-1289`).
 
@@ -409,8 +427,9 @@ they solve different problems and work best *together*:
                                     ▲
    in-game action ──▶ bridge ──▶ /api/bridge/push ──▶ /ws "bridge_event" ──▶ optimistic flash (<200ms)
                                     │
-                                    └──▶ planner polls /inventory,/money ──▶ merge live counts
-                                                                   (fallback to save if bridge offline)
+                                     └──▶ planner polls /inventory,/money ──▶ merge live counts
+                                              (game closed → save-only is normal;
+                                               game up, bridge down → flag it)
 ```
 
 Because the bridge can be flaky (see this repo's
@@ -418,7 +437,27 @@ Because the bridge can be flaky (see this repo's
 in this game yielded an unstable bridge), **never make the bridge the source of
 truth.** The save parse is always the canonical, durable state. Use the bridge
 for: (a) optimistic UI feedback that the watchdog later confirms/overrides, and
-(b) write actions you can't express by editing a save cleanly.
+(b) **all writes into the running game** — the bridge is the *only* mutation
+channel (see the design invariants below).
+
+#### The truth model: who knows the game is up?
+
+The bridge lives *inside the game process*, so it inherently knows whether the
+game is running — it is the **liveness authority**, not the planner:
+
+| Game | Bridge | Meaning | What the planner should show |
+|---|---|---|---|
+| not running | (can't exist) | **Normal** — save file is the most current game data | Save-only read mode; "saved as of HH:MM"; no warning |
+| running | up | **Live** | Green ● live badge, live counts, writes allowed |
+| running | down | **Error** — the bridge should be up whenever the game is | Loud "bridge down while game is running" flag; save data shown as degraded fallback |
+
+The companion idea is **bridge-owned lifecycle**: the bridge (which knows the
+game just started) is the natural component to *spawn the planner* when the
+game opens, to send a periodic **heartbeat** the planner uses to derive "live",
+and to supervise/restart the planner. The planner, in turn, is the
+**non-fragile** side: it owns all state, and losing the heartbeat simply drops
+it to save-only read mode. (Status of these features in this repo:
+[`GAP_ANALYSIS_2026-09-01.md`](GAP_ANALYSIS_2026-09-01.md) gap G0.)
 
 **When you replicate for a new game:**
 - **Always build the watchdog path first.** It needs no mod, is robust, and is
@@ -427,9 +466,21 @@ for: (a) optimistic UI feedback that the watchdog later confirms/overrides, and
   BepInEx-style plugin (i.e. `.NET`/Mono, not IL2CPP, and a stable lifecycle —
   verify `Plugin.Update()` actually fires; in Travellers Rest it never did, so
   the bridge had to call game APIs off-thread).
-- **Make every bridge path degrade gracefully** to the save-file path so both
-  share the same read. Both should converge on the same `GameState`.
-- Expose bridge status so the UI can show "live" vs "offline (save-only)".
+- **Never mutate the game through the save file.** This is a hard invariant:
+  the save is *read-only* to the planner. Save byte-patching feels useful (it
+  works offline!) but it muddies the role of each part — the game never sees
+  the change until reload, the running game diverges from disk, and you end up
+  maintaining a fragile second mutation path. When the bridge is offline, write
+  endpoints simply refuse (503 "game not running").
+- **Make every bridge mutation verify itself**: return the live value *before*
+  and *after* the change (read in the same serialized block), so the planner
+  can confirm what the game actually did — never trust `"ok"` alone.
+- **The bridge reports raw IDs/counts only** — no names, no catalog. The
+  planner resolves IDs through its own extracted data. This keeps the bridge
+  thin and the knowledge base in one place.
+- Distinguish **game-closed (normal save-only)** from **game-up-but-bridge-down
+  (error)** using the bridge as the liveness authority; surface the latter
+  loudly.
 - Consume bridge *push* events over the same WebSocket channel you already use
   for `save_changed`, so clients have one socket, two message types.
 
@@ -516,7 +567,18 @@ between-saves log is just those diffs histogrammed against the last snapshot.
       - [ ] Build offline (`dotnet build -c Release`), deploy DLL to
             `<Game>_Data`/..`/BepInEx/plugins/` **and restart the game**.
       - [ ] Wire planner to poll it (`/api/inventory`, `/money`) & merge as a
-            *live hint*; always fall back to the save parse as truth.
+            *live hint*; always treat the save parse as truth.
+      - [ ] **No save-file mutation, ever** — all writes go through the
+            bridge; when the bridge is offline, write endpoints refuse (503
+            "game not running"). The save is read-only to the planner.
+      - [ ] **Verified before/after on every mutation** — read the live value
+            before and after the change in the same serialized block and
+            return both; never trust `"ok"` alone.
+      - [ ] **Bridge reports raw IDs/counts only** — the planner resolves
+            IDs to names via its own catalog (no duplicated knowledge).
+      - [ ] **Heartbeat + liveness from the bridge** — the bridge knows the
+            game is up; heartbeat → planner live mode, no heartbeat →
+            save-only. Game-up-but-bridge-down is an error to surface.
       - [ ] Verify `Plugin.Update()` actually ticks for your game before relying
             on main-thread dispatch (TR: it didn't → call game APIs off-thread
             under a lock). *(see §7 "the in-game bridge, in depth")*
