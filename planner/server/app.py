@@ -19,7 +19,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -207,6 +207,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------- Share-mode write auth (gap SEC-1) ----------------------------------
+# Default mode binds 127.0.0.1 — no token needed. In --share/--tunnel mode
+# (TR_SHARE=1), game-mutating endpoints require the per-run SHARE_TOKEN so a
+# public link can't mutate the host's game. The host's own direct-localhost
+# browser stays frictionless; ngrok-proxied traffic (loopback + X-Forwarded-For)
+# is NOT treated as local.
+
+def _is_local_client(request: Request) -> bool:
+    """True only for direct loopback connections. Tunnel traffic arrives from
+    127.0.0.1 too but always carries X-Forwarded-For, so it is not local."""
+    if request.headers.get("x-forwarded-for"):
+        return False
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _share_mode() -> bool:
+    return os.environ.get("TR_SHARE", "0") == "1"
+
+
+def _write_denied(request: Request):
+    """Token gate for game-mutating endpoints. Returns a 401 response when
+    share-mode auth fails, else None (allow)."""
+    if not _share_mode() or _is_local_client(request):
+        return None
+    supplied = request.headers.get("x-share-token") or request.query_params.get("token")
+    if supplied and _secrets.compare_digest(str(supplied), SHARE_TOKEN):
+        return None
+    return JSONResponse(
+        {"error": "share token required — open the share link with its #t= token (or send the X-Share-Token header)"},
+        status_code=401,
+    )
 
 
 # ---------- Routes -----------------------------------------------------------
@@ -933,8 +967,11 @@ async def _try_bridge(path: str, payload: dict, timeout: float = 3.5):
 
 
 @app.post("/api/cheat/money")
-async def api_cheat_money(data: dict):
+async def api_cheat_money(data: dict, request: Request):
     """Set/add money via the in-game bridge (1g = 10000c). Refuses if the bridge is offline."""
+    denied = _write_denied(request)
+    if denied:
+        return denied
     # Try realtime bridge first
     try:
         copper = int(data.get("copper", data.get("amount", 0)))
@@ -983,8 +1020,11 @@ async def api_cheat_money(data: dict):
 
 
 @app.post("/api/cheat/seed")
-async def api_cheat_seed(data: dict):
+async def api_cheat_seed(data: dict, request: Request):
     """Add seeds via the in-game bridge (sync). Refuses if the bridge is offline."""
+    denied = _write_denied(request)
+    if denied:
+        return denied
     try:
         item_id = int(data.get("itemId", data.get("item_id", data.get("seedId", 0))))
         count = int(data.get("count", data.get("amount", data.get("qty", 10))))
@@ -1017,8 +1057,11 @@ async def api_cheat_seed(data: dict):
 
 
 @app.post("/api/shop/buy")
-async def api_shop_buy(data: dict):
+async def api_shop_buy(data: dict, request: Request):
     """Remote buy: add item to inventory and subtract money via the in-game bridge. Refuses if the bridge is offline."""
+    denied = _write_denied(request)
+    if denied:
+        return denied
     try:
         item_id = int(data.get("itemId", data.get("item_id", 0)))
         count = int(data.get("count", 1))
@@ -1050,8 +1093,11 @@ async def api_shop_buy(data: dict):
 
 
 @app.post("/api/shop/sell")
-async def api_shop_sell(data: dict):
+async def api_shop_sell(data: dict, request: Request):
     """Remote sell: remove item and add money via the in-game bridge. Refuses if the bridge is offline."""
+    denied = _write_denied(request)
+    if denied:
+        return denied
     try:
         item_id = int(data.get("itemId", data.get("item_id", 0)))
         count = int(data.get("count", 1))
@@ -1088,7 +1134,12 @@ async def api_shop_sell(data: dict):
 # to disk (which takes 0.5-2s even in single-file mode).
 
 @app.post("/api/bridge/push")
-async def api_bridge_push(data: dict):
+async def api_bridge_push(data: dict, request: Request):
+    # Anti-spoof: in share mode only the local bridge itself may push (it never
+    # leaves this machine; remote/tunneled callers are rejected outright).
+    # Default mode is bound to 127.0.0.1 anyway, so no check needed there.
+    if _share_mode() and not _is_local_client(request):
+        return JSONResponse({"error": "bridge push is local-only"}, status_code=403)
     # Validate minimal shape
     t = str(data.get("type", "bridge_event"))
     ev = data.get("event", data)
@@ -1218,13 +1269,21 @@ def main():
 
     host = "0.0.0.0" if args.share or args.tunnel else "127.0.0.1"
 
+    if args.share or args.tunnel:
+        # Gate game-mutating endpoints behind the per-run SHARE_TOKEN (SEC-1):
+        # guests open the share URL (which carries #t=<token>); the host's own
+        # direct-localhost browser is exempt.
+        os.environ["TR_SHARE"] = "1"
+        print(f"  Share token (writes): {SHARE_TOKEN}")
+
     if args.share:
         import socket
         local_ip = socket.gethostbyname(socket.gethostname())
         _allowed_origins.append(f"http://{local_ip}:{args.port}")
         print(f"\n  Sharing on your local network!")
-        print(f"  Give this to your friends on the same WiFi/LAN:")
-        print(f"  http://{local_ip}:{args.port}/\n")
+        print(f"  Give this to your friends on the same WiFi/LAN")
+        print(f"  (link carries the write token):")
+        print(f"  http://{local_ip}:{args.port}/#t={SHARE_TOKEN}\n")
 
     if args.tunnel:
         import threading
@@ -1237,8 +1296,9 @@ def main():
                 _allowed_origins.append(tunnel.public_url)
                 _allowed_origins.append(tunnel.public_url.replace("https://", "http://"))
                 print(f"\n  ==========================================")
-                print(f"  Public share link — send to your friends:")
-                print(f"  {tunnel.public_url}")
+                print(f"  Public share link — send to your friends")
+                print(f"  (link carries the write token):")
+                print(f"  {tunnel.public_url}/#t={SHARE_TOKEN}")
                 print(f"  ==========================================\n")
             except ImportError:
                 print("\n  pyngrok not installed. Run: pip install pyngrok")

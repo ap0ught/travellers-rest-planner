@@ -4,6 +4,18 @@ import { Plan, SaveSlot, Language } from "./types";
 // built files itself, so relative URLs work either way.
 const API = "";
 
+// Share token (SEC-1): in --share/--tunnel mode, game-mutating endpoints
+// require the per-run token. It arrives in the share URL as #t=<token> (or
+// ?token=); we send it back as the X-Share-Token header on every write.
+let shareToken = "";
+{
+  const m = location.hash.match(/[#&]t=([^&]+)/);
+  if (m) shareToken = m[1];
+  const q = new URLSearchParams(location.search).get("token");
+  if (q) shareToken = q;
+}
+const authHeaders = (): Record<string, string> => (shareToken ? { "X-Share-Token": shareToken } : {});
+
 export async function fetchSaves(): Promise<SaveSlot[]> {
   const r = await fetch(`${API}/api/saves`);
   if (!r.ok) throw new Error(await r.text());
@@ -28,7 +40,7 @@ export async function fetchPlan(slot: string, lang: string): Promise<Plan> {
 export async function cheatMoney(slot: string, copper: number, action: "set" | "add" = "set"): Promise<any> {
   const r = await fetch(`${API}/api/cheat/money`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ slot, copper, action }),
   });
   if (!r.ok) throw new Error(await r.text());
@@ -38,7 +50,7 @@ export async function cheatMoney(slot: string, copper: number, action: "set" | "
 export async function cheatSeed(slot: string, itemId: number, count: number = 10): Promise<any> {
   const r = await fetch(`${API}/api/cheat/seed`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ slot, itemId, count }),
   });
   if (!r.ok) throw new Error(await r.text());
@@ -54,7 +66,7 @@ export async function fetchInventoryGrouped(slot: string): Promise<any> {
 export async function shopBuy(slot: string, itemId: number, count: number, price: number): Promise<any> {
   const r = await fetch(`${API}/api/shop/buy`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ slot, itemId, count, price }),
   });
   if (!r.ok) throw new Error(await r.text());
@@ -63,7 +75,7 @@ export async function shopBuy(slot: string, itemId: number, count: number, price
 export async function shopSell(slot: string, itemId: number, count: number, price: number): Promise<any> {
   const r = await fetch(`${API}/api/shop/sell`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ slot, itemId, count, price }),
   });
   if (!r.ok) throw new Error(await r.text());

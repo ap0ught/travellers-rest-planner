@@ -108,6 +108,28 @@ gracefully. No heartbeat has never existed yet (see G0).
   refusal behavior, and four malformed JSX comments that broke `tsc -b`
   were fixed.
 
+### SEC-1 — `SHARE_TOKEN` was generated but never enforced ✅
+- **Was:** `SHARE_TOKEN = _secrets.token_urlsafe(16)` at `app.py` was
+  generated and never referenced; CORS allow-list was the only guard, so a
+  public share/tunnel link allowed anyone to mutate the host's game
+  (cheat/buy/sell) and to spoof `bridge_event` pushes.
+- **Fix:** share-mode (`--share`/`--tunnel` → `TR_SHARE=1`) token gate:
+  - Game-mutating endpoints (`/api/cheat/*`, `/api/shop/*`) require the
+    per-run token (`X-Share-Token` header or `?token=`), compared with
+    `secrets.compare_digest`. 401 otherwise.
+  - The host's own direct-localhost browser is exempt (frictionless);
+    ngrok-proxied traffic is NOT exempt (loopback + `X-Forwarded-For`
+    ⇒ treated as remote).
+  - `/api/bridge/push` is local-only in share mode (403 for
+    remote/tunneled callers — anti-spoof; the bridge never leaves the
+    machine). Default mode is unchanged (bound to `127.0.0.1`).
+  - Share URLs now carry the token: `http://ip:port/#t=<token>` — printed
+    by `--share`/`--tunnel` startup. The React UI extracts `#t=`/`?token=`
+    and sends `X-Share-Token` on all four write calls.
+  - Regression tests: `tests/test_share_token.py` (default mode open,
+    401 without/with-wrong token, pass with header/query token,
+    bridge-push 403 remote, 200 default).
+
 ## 4. Open gaps (issue-ready)
 
 ### G0 — No bridge-owned lifecycle: no heartbeat, bridge doesn't spawn the planner
@@ -159,18 +181,6 @@ gracefully. No heartbeat has never existed yet (see G0).
   events).
 - **Files:** `planner/server/app.py` (new), `planner/server/static.py`.
 
-### SEC-1 — `SHARE_TOKEN` generated but never enforced
-- **Vision:** when sharing over LAN/ngrok, write endpoints require a token so
-  guests can't mutate live state / spend money uninvited.
-- **Current:** `SHARE_TOKEN = _secrets.token_urlsafe(16)` at `app.py:~198`
-  is generated and never referenced again; CORS allow-list is the only guard.
-- **Effort:** **M** (token gate on `/api/cheat/*`, `/api/shop/*`,
-  `/api/bridge/push`; propagate to share URL; UI sends header).
-- **Files:** `planner/server/app.py`, `planner/server/static.py`.
-- **Note:** with MUT-1 landed, an unauthenticated writer can now only reach
-  the bridge (game must be running), but `/api/bridge/push` spoofing and
-  remote cheat writes still need the gate.
-
 ### DEG-1 — Degraded state not surfaced (bridge down while game up)
 - **Vision:** state matrix row 3 — a loud, explicit "bridge should be up"
   error, distinct from the normal save-only state.
@@ -185,10 +195,12 @@ gracefully. No heartbeat has never existed yet (see G0).
   pass-through, `bridge_event` routing, `live_status` broadcast, token gate —
   each auto-skipping when the game/bridge is absent (pattern already used by
   `test_live_seed_happy_path.py`).
-- **Current:** 83 passing tests cover catalog/currency/parser/math/API, but
-  nothing for the above; the live seed happy-path test needs updating for the
-  new before/after response shape.
-- **Effort:** **M**. **Depends-on:** G0, G1, EV-1, SEC-1.
+- **Current:** 90 passing tests cover catalog/currency/parser/math/API,
+  bridge realtime + rebroadcast, and the SEC-1 token gate
+  (`tests/test_share_token.py`). Still missing: heartbeat/mode transitions
+  (G0/G1), `live_status` broadcast, before/after pass-through in the live
+  happy-path test (needs the game+bridge running to update).
+- **Effort:** **M**. **Depends-on:** G0, G1.
 - **Files:** `tests/` (new), `tests/test_live_seed_happy_path.py` (update).
 
 ---
@@ -196,7 +208,7 @@ gracefully. No heartbeat has never existed yet (see G0).
 ## 5. Suggested triage order
 
 1. ~~**EV-1** (S) — quick win; makes MUT-2's before/after visible in the UI.~~ ✅ done
-2. **SEC-1** (M) — sharing is exposed today.
+2. ~~**SEC-1** (M) — sharing is exposed today.~~ ✅ done
 3. **G0** (L) — heartbeat + bridge-spawns-planner; unlocks everything below.
 4. **G1** (M) → **DEG-1** (S/M) — mode + status badge + degraded flag.
 5. **LV-1** (L) — provenance badges everywhere.

@@ -360,14 +360,16 @@ and can even *write* to it (cheat/buy/sell). That's sensitive, so gate it:
 - **Restrict CORS to an explicit allow-list** of origins (localhost + the
   specific LAN/tunnel URL being served) — the repo builds `_allowed_origins`
   from the running host/port (`app.py:198-207`), not a wildcard.
-- **Put an auth token in front of share mode.** The repo generates a
-  `SHARE_TOKEN` (random, per-run — `app.py:198`) intended for exactly this —
-  but as of writing it is **generated and not yet enforced** on any endpoint;
-  the CORS allow-list is the only active guard (tracked as gap `SEC-1` in
-  [`GAP_ANALYSIS_2026-09-01.md`](GAP_ANALYSIS_2026-09-01.md)). When you
-  replicate: require the token on write endpoints (`/api/cheat/*`,
-  `/api/shop/*`, `/api/bridge/push`) for shared/tunneled connections so a
-  public ngrok link isn't an open door to someone's game.
+- **Put an auth token in front of share mode.** The repo gates game-mutating
+  endpoints with a per-run `SHARE_TOKEN` (`app.py`): in `--share`/`--tunnel`
+  mode, `/api/cheat/*` and `/api/shop/*` require it (`X-Share-Token` header or
+  `?token=`, constant-time compare; 401 otherwise), `/api/bridge/push` is
+  local-only (403 remote — anti-spoof), the host's direct-localhost browser
+  is exempt, and ngrok traffic (loopback + `X-Forwarded-For`) counts as
+  remote. Share URLs carry the token as `#t=<token>`; the UI picks it up and
+  sends it on writes. When you replicate: keep default mode bound to
+  `127.0.0.1` with no token friction, and gate exactly the game-mutating
+  endpoints — reads can stay open for guests.
 - **Only the read endpoints are harmless to share; gate the write endpoints**
   (`/api/cheat/*`, `/api/shop/*`) so random viewers can't mutate the host's game.
 

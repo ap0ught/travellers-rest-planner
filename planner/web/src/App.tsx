@@ -76,7 +76,7 @@ function GroupedInventory({ slot, mode, onAction, onError, pushToast, bridgeLive
   if (err) return <div className="empty" style={{ color: "var(--bad)" }}>{err}</div>;
   if (!data) return <div className="empty">loading inventory…</div>;
   if (!bridgeLive && mode) {
-    return <div className="card" style={{ borderColor: "var(--bad)", background: "#2a1a1a" }}><div style={{ fontWeight: 600, color: "var(--bad)" }}>● Read-only — bridge offline</div><div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>Buy/Sell requires the in-game PlannerBridge (BepInEx). Restart Travellers Rest — check <code>BepInEx/LogOutput.log</code> for <code>PlannerBridge 1.1.x loaded</code> and ensure <code>http://127.0.0.1:8766/ping</code> responds. Gold cheat still works via save-patch (needs Load Game).</div></div>;
+    return <div className="card" style={{ borderColor: "var(--bad)", background: "#2a1a1a" }}><div style={{ fontWeight: 600, color: "var(--bad)" }}>● Read-only — bridge offline</div><div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>Buy/Sell/cheat all go through the in-game PlannerBridge (BepInEx) — it is the only write channel, so none of them work while it is offline (no save-patch fallback). Restart Travellers Rest — check <code>BepInEx/LogOutput.log</code> for <code>PlannerBridge 1.1.x loaded</code> and ensure <code>http://127.0.0.1:8766/ping</code> responds.</div></div>;
   }
   const groups = data.groups as Record<string, any[]>;
   const order = ["Seeds", "Farming (harvest)", "Foraging", "Fishing", "Vendors", "Crafted", "Other"];
