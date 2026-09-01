@@ -263,6 +263,34 @@ header.spine .row {
 }
 .ws-pill.dead { color: var(--burgundy); border-color: var(--burgundy); }
 .ws-pill.dead::before { background: var(--burgundy); }
+
+/* bridge event toasts — realtime confirmations pushed from the in-game bridge */
+#bridgeToasts {
+  position: fixed;
+  right: 14px; bottom: 14px;
+  display: flex; flex-direction: column; gap: 8px;
+  z-index: 2000;
+  max-width: 360px;
+}
+.bridge-toast {
+  font-size: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--moss-deep);
+  background: var(--moss-pale);
+  color: var(--ink);
+  box-shadow: 0 2px 10px rgba(26,16,8,0.25);
+  display: flex; gap: 8px; align-items: baseline;
+  animation: toastIn 0.18s ease-out;
+}
+.bridge-toast .t {
+  font-family: var(--font-display-sc);
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--moss-deep); white-space: nowrap;
+}
+.bridge-toast.err { border-color: var(--burgundy); background: #f2dcdc; }
+.bridge-toast.err .t { color: var(--burgundy); }
+.bridge-toast.out { opacity: 0; transition: opacity 0.5s ease; }
+@keyframes toastIn { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
@@ -1889,6 +1917,8 @@ footer.colophon .orn {
     </div>
   </div>
 </header>
+
+<div id="bridgeToasts"></div>
 
 <nav class="tabs">
   <div class="row">
@@ -3738,6 +3768,34 @@ function runSearch(query) {
 /* ============================================================
    WEBSOCKET
    ============================================================ */
+/* Bridge event label — uses the bridge's verified before/after contract:
+   every mutation reports what the live value was BEFORE and AFTER the change
+   (-1 = could not verify), so we can show "2 → 7" instead of just "ok". */
+function bridgeEventLabel(tp, d) {
+  const g = c => (c >= 0 ? (c / 10000).toFixed(2) + "g" : "?");
+  if (tp === "addItem" || tp === "addSeed")
+    return `+${d.count ?? "?"} × #${d.itemId ?? "?"}` + (d.after >= 0 ? `  (${d.before} → ${d.after})` : "");
+  if (tp === "addMoney")
+    return `${(Number(d.copper ?? 0) / 10000).toFixed(2)}g` + (d.after >= 0 ? `  (${g(d.before)} → ${g(d.after)})` : "");
+  if (tp === "shop/buy" || tp === "shop/sell")
+    return `${tp === "shop/buy" ? "bought" : "sold"} ${d.count ?? "?"} × #${d.itemId ?? "?"}` +
+      (d.after_item >= 0 ? `  (item ${d.before_item} → ${d.after_item} · ${g(d.before_money)} → ${g(d.after_money)})` : "");
+  if (tp === "addItem_error") return `add failed: ${d.error ?? "?"}`;
+  if (tp === "value_read") return null; // targeted query, not a change
+  return tp;
+}
+
+function bridgeToast(kind, text) {
+  const host = $("#bridgeToasts");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = "bridge-toast" + (kind === "err" ? " err" : "");
+  el.innerHTML = `<span class="t">${kind === "err" ? "bridge err" : "bridge"}</span><span>${esc(text)}</span>`;
+  host.appendChild(el);
+  while (host.children.length > 5) host.firstChild.remove();
+  setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 600); }, 4200);
+}
+
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   let backoff = 800;
@@ -3760,6 +3818,15 @@ function connectWS() {
       try {
         const m = JSON.parse(ev.data);
         if (m.type === "save_changed") setTimeout(loadAll, 500);
+        if (m.type === "bridge_event") {
+          // Realtime bridge confirmation (sub-second, before the save flushes).
+          // Toast the verified before/after, then refresh to merge live counts.
+          const be = m.event || {};
+          const tp = be.type || "change";
+          const label = bridgeEventLabel(tp, be.data || {});
+          if (label) bridgeToast(tp.endsWith("_error") ? "err" : "bridge", label);
+          setTimeout(loadAll, 250);
+        }
         if (m.type === "cart_updated" && m.slot === STATE.slot) {
           CART = m.cart || [];
           updateCartWidget();

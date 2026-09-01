@@ -87,10 +87,26 @@ gracefully. No heartbeat has never existed yet (see G0).
   returns `before`/`after` in both the HTTP response and the pushed
   `bridge_event`; `-1` = could not verify. New `GET /value?itemId=N[&money=1]`
   targeted verified read ("how many of X right now?").
-- **Still open:** planner/UI consumption — see HB-1 (badge on verified
-  before/after) and the UI bridge_event gap (EV-1).
+- **Still open:** surfacing the verified before/after in mutation *responses*
+  beyond the toast (e.g. cheat panel confirming the new balance) — folded
+  into LV-1 (provenance surfacing). The toast path itself is done (EV-1).
 
 ---
+
+### EV-1 — `bridge_event` broadcasts were dropped by the frontend ✅
+- **Was:** backend rebroadcasts `bridge_event` (`/api/bridge/push` → `/ws`),
+  but the single-file UI's `connectWS` in `static.py` handled only
+  `save_changed`/`cart_updated`/`menu_updated` — every `bridge_event` was
+  silently ignored. (The React UI already consumed it, but rendered raw JSON.)
+- **Fix:** single-file UI now has a ledger-themed toast stack
+  (`#bridgeToasts`): every bridge event renders a human label using the
+  verified before/after contract (`+5 × #123 (2 → 7)`,
+  `bought 3 × #45 (item 2 → 12 · 1.00g → 0.90g)`, errors in burgundy), then
+  refreshes at 250 ms to merge live counts ahead of the save flush. The React
+  UI's toast was upgraded to the same before/after labels, its stale
+  "save-patch (needs Load)" cheat label was corrected to the bridge-only
+  refusal behavior, and four malformed JSX comments that broke `tsc -b`
+  were fixed.
 
 ## 4. Open gaps (issue-ready)
 
@@ -143,17 +159,6 @@ gracefully. No heartbeat has never existed yet (see G0).
   events).
 - **Files:** `planner/server/app.py` (new), `planner/server/static.py`.
 
-### EV-1 — `bridge_event` broadcasts are dropped by the frontend
-- **Vision:** bridge actions pulse the UI sub-second: toast + optimistic
-  count flash from the event's verified `before`/`after`, then the save
-  watcher confirms.
-- **Current:** backend rebroadcasts `bridge_event` (`/api/bridge/push` →
-  `/ws`), but `connectWS` in `static.py:~3759-3772` handles only
-  `save_changed`/`cart_updated`/`menu_updated` — every `bridge_event` is
-  silently ignored. Quick win.
-- **Effort:** **S**. **Depends-on:** —.
-- **Files:** `planner/server/static.py`.
-
 ### SEC-1 — `SHARE_TOKEN` generated but never enforced
 - **Vision:** when sharing over LAN/ngrok, write endpoints require a token so
   guests can't mutate live state / spend money uninvited.
@@ -190,7 +195,7 @@ gracefully. No heartbeat has never existed yet (see G0).
 
 ## 5. Suggested triage order
 
-1. **EV-1** (S) — quick win; makes MUT-2's before/after visible in the UI.
+1. ~~**EV-1** (S) — quick win; makes MUT-2's before/after visible in the UI.~~ ✅ done
 2. **SEC-1** (M) — sharing is exposed today.
 3. **G0** (L) — heartbeat + bridge-spawns-planner; unlocks everything below.
 4. **G1** (M) → **DEG-1** (S/M) — mode + status badge + degraded flag.

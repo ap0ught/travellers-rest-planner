@@ -274,8 +274,13 @@ function CalendarWeek({ w }: { w: WeekPlan }) {
 
 function Cheat({ slot, money, onReload, onError, pushToast, bridgeLive }: { slot: string; money: number; onReload: () => void; onError: (e: string) => void; pushToast: (k:"bridge"|"save"|"error", t:string)=>void; bridgeLive: boolean }) {
   const doCheat = async (copper:number, label:string, action:"add"|"set") => {
-    // Gold cheat has save-patch fallback so it works even when bridge is down — keep enabled
-    try { const r = await cheatMoney(slot, copper, action); const mode = r.bridge ? (r.realtime ? "realtime" : "save-patch (needs Load)") : "save-patch"; pushToast(r.bridge ? "bridge" : "save", `✓ ${label}: ${mode}${r.queued?" (queued)":""}`); setTimeout(onReload, 350); setTimeout(onReload, 1200); }
+    // Bridge is the ONLY mutation channel — no save-patch fallback. If the
+    // bridge is offline the request refuses (503 "game not running") and we
+    // surface that as an error.
+    try { const r = await cheatMoney(slot, copper, action);
+      const verified = r.before >= 0 && r.after >= 0 ? ` (${fmtMoney(r.before)} → ${fmtMoney(r.after)})` : "";
+      pushToast("bridge", `✓ ${label}: realtime${r.queued?" (queued)":""}${verified}`);
+      setTimeout(onReload, 350); setTimeout(onReload, 1200); }
     catch(e){ const m=String(e); pushToast("error", `✗ Gold failed: ${m.slice(0,220)}`); onError(m); }
   };
   return (
@@ -360,14 +365,27 @@ export default function App() {
             // also refresh debug panel
             fetchDebugSaves().then(setDebugSaves).catch(()=>{});
           } else if (m.type === "bridge_event") {
+            // Bridge pushes verified before/after with every mutation — show
+            // "2 → 7" instead of raw JSON so the user sees what the game did.
             const ev2 = m.event ?? m;
             const tp = ev2.type ?? ev2.data?.type ?? "change";
-            const detail = ev2.data ? JSON.stringify(ev2.data).slice(0,120) : "";
-            const label = tp === "addItem" ? `+${ev2.data?.count ?? ""} x #${ev2.data?.itemId ?? ""}` :
-                          tp === "addMoney" ? `${(Number(ev2.data?.copper??0)/10000).toFixed(2)}g` :
-                          tp === "shop/buy" ? `bought #${ev2.data?.itemId}` :
-                          tp === "shop/sell" ? `sold #${ev2.data?.itemId}` : tp;
-            pushToast("bridge", `✓ Bridge ${label} ${detail ? "· " + detail : ""}`);
+            const d = ev2.data ?? {};
+            const g = (c: number) => fmtMoney(c ?? -1);
+            const label =
+              tp === "addItem" || tp === "addSeed"
+                ? `+${d.count ?? "?"} x #${d.itemId ?? "?"}${d.after >= 0 ? ` (${d.before} → ${d.after})` : ""}`
+                : tp === "addMoney"
+                ? `${(Number(d.copper ?? 0) / 10000).toFixed(2)}g${d.after >= 0 ? ` (${g(d.before)} → ${g(d.after)})` : ""}`
+                : tp === "shop/buy" || tp === "shop/sell"
+                ? `${tp === "shop/buy" ? "bought" : "sold"} ${d.count ?? "?"} x #${d.itemId ?? "?"}${
+                    d.after_item >= 0 ? ` (item ${d.before_item} → ${d.after_item} · ${g(d.before_money)} → ${g(d.after_money)})` : ""
+                  }`
+                : tp === "addItem_error"
+                ? `add failed: ${d.error ?? "?"}`
+                : tp === "value_read"
+                ? null
+                : tp;
+            if (label) pushToast("bridge", `✓ Bridge ${label}`);
             setPulseKey(k => k + 1);
             // bridge events are realtime — reload sooner (150ms) to show inventory change before save flush
             setTimeout(reload, 150);
@@ -496,7 +514,7 @@ export default function App() {
                Each card displays profit, time, fuel, and ingredient availability
                (green ✓ if you have enough, red ✗ if missing).
                Ingredients are color‑coded against your live inventory counts.
-               */
+               */}
               <h2 id="cook" className="section">Cook now (trending food, unlocked) <a href="#top" style={{ marginLeft: 6, fontSize: 12, opacity: 0.5 }}>^</a></h2>
               {plan.cook_now.length === 0
                 ? <div className="empty">No trending food recipes unlocked.</div>
@@ -506,7 +524,7 @@ export default function App() {
                Shows trending drink recipes unlocked for the current week.
                Same layout as Cook now: profit, time, fuel, and ingredient availability.
                Ingredients highlighted green/red against your live inventory.
-               */
+               */}
               <h2 id="brew" className="section">Brew now (trending drinks, unlocked) <a href="#top" style={{ marginLeft: 6, fontSize: 12, opacity: 0.5 }}>^</a></h2>
               {plan.brew_now.length === 0
                 ? <div className="empty">No trending drinks unlocked.</div>
@@ -517,19 +535,21 @@ export default function App() {
                trends, season, and deadlines for planting/crafting.
                Click a week to explore details; helps plan ahead for seed buying,
                crop rotation, and profit maximisation.
-               */
+               */}
               <h2 id="calendar" className="section">4-week trend calendar <a href="#top" style={{ marginLeft: 6, fontSize: 12, opacity: 0.5 }}>^</a></h2>
               <div className="calendar">
                 {plan.calendar.map((w) => <CalendarWeek key={w.week_offset} w={w} />)}
               </div>
 
               {/* ── Cheat ──
-               Gold‑/bridge‑cheat controls.
-               +5g / −5g buttons adjust save‑file money (requires Load Game when bridge down).
+               Gold‑cheat controls. The bridge is the ONLY mutation channel:
+               when the bridge is offline the planner refuses (503 "game not
+               running") — there is no save‑patch fallback. Every mutation
+               returns verified before/after copper.
                F8 toggles in‑game overlay toast (PlannerBridge F8 handler).
                /debug/inventory shows live bridge counts for diagnostics.
                SaveAnywhere removed — only File_1 is tracked in realtime.
-               */
+               */}
               <h2 id="cheat" className="section">Cheat <a href="#top" style={{ marginLeft: 6, fontSize: 12, opacity: 0.5 }}>^</a></h2>
               <Cheat slot={slot} money={plan.today.money_copper} onReload={reload} onError={setError} pushToast={pushToast} bridgeLive={bridgeLive} />
               <div style={{ fontSize: 12, opacity: 0.6, marginTop: 6 }}>BepInEx bridge 1.1.1 realtime — buy/sell now as reliable as gold cheat (sync main-thread wait + TryForceSave + live inventory). SaveAnywhere removed — only File_1 realtime. F8 overlay, /debug/inventory for diagnostics.</div>
