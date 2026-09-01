@@ -65,6 +65,12 @@ def test_cheat_seed_flows_through_sim_with_verified_before_after(client, sim, mo
     assert r2.json()["before"] == 5 and r2.json()["after"] == 10
 
 
+def test_bridged_response_leaks_no_internal_fields(client, sim, monkeypatch):
+    monkeypatch.setenv("TR_BRIDGE_BASE", sim.url)
+    j = client.post("/api/cheat/seed", json={"itemId": 42, "count": 5}).json()
+    assert not any(k.startswith("_") for k in j), f"internal fields leaked: {list(j)}"
+
+
 def test_cheat_money_set_and_add_through_sim(client, sim, monkeypatch):
     monkeypatch.setenv("TR_BRIDGE_BASE", sim.url)
     r = client.post("/api/cheat/money", json={"copper": 25000, "action": "set"})

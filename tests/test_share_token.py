@@ -21,11 +21,16 @@ def client():
 @pytest.fixture()
 def share_mode(monkeypatch):
     monkeypatch.setenv("TR_SHARE", "1")
+    # Hermetic: pin the bridge at a dead port so a live bridge/simulator on
+    # 8766 can't leak into these tests.
+    monkeypatch.setenv("TR_BRIDGE_BASE", "http://127.0.0.1:9")
 
 
-def test_default_mode_no_token_needed(client):
+def test_default_mode_no_token_needed(client, monkeypatch):
     # TestClient's client host is "testclient" (non-local), yet default mode
-    # must not gate: the server is bound to 127.0.0.1 anyway.
+    # must not gate: the server is bound to 127.0.0.1 anyway. Hermetic bridge
+    # pin (dead port) so the expected result is always the offline refusal.
+    monkeypatch.setenv("TR_BRIDGE_BASE", "http://127.0.0.1:9")
     r = client.post("/api/cheat/money", json={"copper": 100})
     assert r.status_code != 401
     assert r.status_code == 503  # proceeds to the offline-bridge refusal

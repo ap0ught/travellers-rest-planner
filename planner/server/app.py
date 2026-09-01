@@ -1018,6 +1018,10 @@ async def _try_bridge(path: str, payload: dict, timeout: float = 3.5):
     return None
 
 
+def _bridged_payload(bridged: dict) -> dict:
+    """Bridge response minus internal fields (e.g. _http_status) — safe to
+    merge into an API response."""
+    return {k: v for k, v in bridged.items() if not k.startswith("_")}
 @app.post("/api/cheat/money")
 async def api_cheat_money(data: dict, request: Request):
     """Set/add money via the in-game bridge (1g = 10000c). Refuses if the bridge is offline."""
@@ -1089,14 +1093,14 @@ async def api_cheat_seed(data: dict, request: Request):
     bridged = await _try_bridge("/addItem", {"itemId": item_id, "count": count})
     if bridged is not None:
         if bridged.get("ok"):
-            return {"bridge": True, "realtime": True, **bridged}
+            return {"bridge": True, "realtime": True, **_bridged_payload(bridged)}
         # bridge returned error JSON (e.g., no inventory, timeout, invalid id)
         if "_http_status" in bridged and bridged.get("_http_status", 200) >= 400:
             err = bridged.get("error") or bridged.get("result") or "bridge error"
-            return JSONResponse({"error": f"bridge: {err}", "bridge": True, "detail": bridged}, status_code=bridged["_http_status"])
+            return JSONResponse({"error": f"bridge: {err}", "bridge": True, "detail": _bridged_payload(bridged)}, status_code=bridged["_http_status"])
         # 202 queued
         if bridged.get("queued"):
-            return {"bridge": True, "realtime": True, "queued": True, **bridged}
+            return {"bridge": True, "realtime": True, "queued": True, **_bridged_payload(bridged)}
     # Bridge not running → refuse. The planner NEVER mutates the game through
     # the save file; the in-game bridge is the only write channel to live state.
     return JSONResponse(
@@ -1125,14 +1129,14 @@ async def api_shop_buy(data: dict, request: Request):
     bridged = await _try_bridge("/shop/buy", {"itemId": item_id, "count": count, "price": price})
     if bridged is not None:
         if bridged.get("ok"):
-            return {"bridge": True, "realtime": True, **bridged}
+            return {"bridge": True, "realtime": True, **_bridged_payload(bridged)}
         if bridged.get("queued"):
-            return {"bridge": True, "realtime": True, "queued": True, **bridged}
+            return {"bridge": True, "realtime": True, "queued": True, **_bridged_payload(bridged)}
         status = int(bridged.get("_http_status", 500)) if isinstance(bridged.get("_http_status"), int) else 500
         if status >= 400:
             err = bridged.get("error") or bridged.get("result") or "bridge buy failed"
             # Mirror gold cheat UX: show why money/inventory failed (e.g., need X have Y, or load save)
-            return JSONResponse({"error": f"buy failed: {err}", "bridge": True, "detail": bridged}, status_code=status)
+            return JSONResponse({"error": f"buy failed: {err}", "bridge": True, "detail": _bridged_payload(bridged)}, status_code=status)
     # Bridge not running → refuse. The planner NEVER mutates the game through
     # the save file; the in-game bridge is the only write channel to live state.
     return JSONResponse(
@@ -1161,13 +1165,13 @@ async def api_shop_sell(data: dict, request: Request):
     bridged = await _try_bridge("/shop/sell", {"itemId": item_id, "count": count, "price": price})
     if bridged is not None:
         if bridged.get("ok"):
-            return {"bridge": True, "realtime": True, **bridged}
+            return {"bridge": True, "realtime": True, **_bridged_payload(bridged)}
         if bridged.get("queued"):
-            return {"bridge": True, "realtime": True, "queued": True, **bridged}
+            return {"bridge": True, "realtime": True, "queued": True, **_bridged_payload(bridged)}
         status = int(bridged.get("_http_status", 500)) if isinstance(bridged.get("_http_status"), int) else 500
         if status >= 400:
             err = bridged.get("error") or bridged.get("result") or "bridge sell failed"
-            return JSONResponse({"error": f"sell failed: {err}", "bridge": True, "detail": bridged}, status_code=status)
+            return JSONResponse({"error": f"sell failed: {err}", "bridge": True, "detail": _bridged_payload(bridged)}, status_code=status)
     # Bridge not running → refuse. The planner NEVER mutates the game through
     # the save file; the in-game bridge is the only write channel to live state.
     return JSONResponse(

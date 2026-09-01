@@ -44,10 +44,13 @@ def test_heartbeat_timeout_drops_to_save_only(client):
     assert not app_module._bridge_live()
 
 
-def test_status_carries_heartbeat_fields_even_when_bridge_http_down(client):
+def test_status_carries_heartbeat_fields_even_when_bridge_http_down(client, monkeypatch):
+    # Hermetic: dead bridge port so a live bridge/simulator on 8766 can't
+    # leak in — the proxy must fail here.
+    monkeypatch.setenv("TR_BRIDGE_BASE", "http://127.0.0.1:9")
     reset_heartbeat()
     r = client.get("/api/bridge/status")
-    assert r.status_code == 503  # bridge HTTP is down in tests
+    assert r.status_code == 503  # bridge HTTP is down
     j = r.json()
     assert "live" in j
     assert "heartbeat_age_s" in j
