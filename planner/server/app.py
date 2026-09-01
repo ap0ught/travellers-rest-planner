@@ -1223,10 +1223,18 @@ async def api_bridge_push(data: dict, request: Request):
 async def api_bridge_heartbeat(data: dict, request: Request):
     """Bridge liveness heartbeat (G0). The in-game bridge POSTs every ~2s
     while the game runs; freshness here is the sole definition of live mode.
-    Local-only in share mode (remote callers may not fake liveness)."""
+    Local-only in share mode (remote callers may not fake liveness).
+
+    A final `stopping: true` beat (sent on game quit) drops the planner to
+    quiet save-only IMMEDIATELY — reason `no_bridge` (game closed, normal),
+    not the alarming `beat_lost` — instead of waiting out the timeout."""
     if _share_mode() and not _is_local_client(request):
         return JSONResponse({"error": "heartbeat is local-only"}, status_code=403)
     global _bridge_last_beat, _bridge_last_info
+    if isinstance(data, dict) and data.get("stopping"):
+        _bridge_last_beat = 0.0
+        _bridge_last_info = {}
+        return {"ok": True, "live": False, "reason": _live_reason()}
     _bridge_last_beat = time.time()
     if isinstance(data, dict):
         _bridge_last_info = {

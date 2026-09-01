@@ -46,7 +46,8 @@ the planner (`:8765`); the planner derives "live" purely from heartbeat
 presence — first heartbeat → live; heartbeat timeout → drop to save-only
 gracefully, with a **reason** (`live` / `no_bridge` / `beat_lost`) so the UI
 stays quiet about "game closed" but loud about a lost beat (see DEG-1).
-Implemented — see G0.
+A final `stopping: true` beat on game quit ends live mode immediately and
+quietly. Implemented — see G0.
 
 **State matrix:**
 
@@ -192,6 +193,10 @@ Implemented — see G0.
   they stopped — amber "bridge lost" pill + toast: *"save-only mode. If the
   game is still running, check BepInEx/LogOutput.log"*). Single-file UI:
   amber `.ws-pill.lost` state; React: badge text + error toast.
+  A **graceful quit** is distinguished too: the bridge's final
+  `stopping: true` beat makes the planner drop to quiet `no_bridge`
+  immediately — no timeout wait, no alarming `beat_lost` (and a later real
+  beat revives live mode, e.g. game relaunch).
 - **Verified in-browser** against the simulator: badge flips
   "bridge live · 2 req" → "bridge lost — check BepInEx log" with the toast
   on beat loss; tests assert the no_bridge → live → beat_lost reason

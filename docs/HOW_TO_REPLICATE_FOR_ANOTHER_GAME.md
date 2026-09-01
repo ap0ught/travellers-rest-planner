@@ -470,8 +470,10 @@ game just started) is the natural component to *spawn the planner* when the
 game opens, to send a periodic **heartbeat** the planner uses to derive "live",
 and to supervise/restart the planner. The planner, in turn, is the
 **non-fragile** side: it owns all state, and losing the heartbeat simply drops
-it to save-only read mode. (Implemented in this repo — see
-[`GAP_ANALYSIS_2026-09-01.md`](GAP_ANALYSIS_2026-09-01.md) gaps G0/G1.)
+it to save-only read mode — quietly on a graceful quit (the bridge's final
+`stopping: true` beat ends live mode immediately), loudly if beats are lost
+mid-session while they should have been flowing. (Implemented in this repo —
+see [`GAP_ANALYSIS_2026-09-01.md`](GAP_ANALYSIS_2026-09-01.md) gaps G0/G1/DEG-1.)
 
 **When you replicate for a new game:**
 - **Always build the watchdog path first.** It needs no mod, is robust, and is

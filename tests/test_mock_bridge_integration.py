@@ -174,6 +174,13 @@ def test_full_stack_heartbeat_flips_live_mode(monkeypatch):
             assert status()["reason"] == "beat_lost"
             with urllib.request.urlopen(sim.url + "/ping", timeout=2) as r:
                 assert json.loads(r.read())["ok"] is True
+
+            # Graceful quit: sim.stop() sends the bridge's final stopping
+            # beat — planner must land on quiet no_bridge immediately, not
+            # stay in the alarming beat_lost.
+            sim.stop()
+            assert wait_until(lambda: status()["reason"] == "no_bridge"), "stopping beat never settled to no_bridge"
+            assert status()["live"] is False
         finally:
             sim.stop()
     finally:

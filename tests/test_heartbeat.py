@@ -48,6 +48,23 @@ def test_heartbeat_timeout_drops_to_save_only(client):
     assert app_module._live_reason() == "beat_lost"
 
 
+def test_stopping_beat_drops_to_quiet_save_only_immediately(client):
+    # Graceful game quit: the bridge's final `stopping: true` beat must end
+    # live mode IMMEDIATELY with reason no_bridge (game closed — normal),
+    # not wait out the timeout into the alarming beat_lost.
+    reset_heartbeat()
+    client.post("/api/bridge/heartbeat", json={})
+    assert app_module._bridge_live()
+    r = client.post("/api/bridge/heartbeat", json={"stopping": True})
+    assert r.status_code == 200
+    assert r.json()["live"] is False
+    assert not app_module._bridge_live()  # immediate, no timeout wait
+    assert app_module._live_reason() == "no_bridge"  # quiet, not beat_lost
+    # a later real beat revives live mode (spurious stop / relaunch)
+    client.post("/api/bridge/heartbeat", json={})
+    assert app_module._bridge_live()
+
+
 def test_status_carries_heartbeat_fields_even_when_bridge_http_down(client, monkeypatch):
     # Hermetic: dead bridge port so a live bridge/simulator on 8766 can't
     # leak in — the proxy must fail here.

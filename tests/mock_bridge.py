@@ -262,6 +262,7 @@ class MockBridge:
         self._planner_url = planner_url
         self._hb_thread: threading.Thread | None = None
         self._hb_stop = threading.Event()
+        self._stopped = False
 
     @property
     def url(self) -> str:
@@ -280,27 +281,40 @@ class MockBridge:
         self._hb_stop.set()
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         self.stop_heartbeat()
+        # Mirror Plugin.cs OnApplicationQuit: best-effort final stopping beat
+        # so the planner drops to quiet save-only immediately (reason
+        # no_bridge) instead of timing out into the alarming beat_lost.
+        # Only when we were heartbeating — a no-heartbeat sim never
+        # advertised liveness and shouldn't touch an unrelated planner.
+        if self._heartbeat:
+            self._send_beat(stopping=True)
         self._server.shutdown()
         self._server.server_close()
+
+    def _send_beat(self, stopping: bool) -> None:
+        try:
+            body = json.dumps({
+                "type": "heartbeat", "bridge": "planner", "version": SIM_VERSION,
+                "uptime_s": round(time.time() - self.state.started_at, 1),
+                "game_running": not stopping, "stopping": stopping,
+                "spawned_planner": False, "planner_restarts": 0,
+            }).encode()
+            req = urllib.request.Request(
+                self._planner_url.rstrip("/") + "/api/bridge/heartbeat",
+                data=body, headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=0.9) as r:
+                r.read()
+        except Exception:
+            pass  # planner not running — same as the real bridge
 
     def _heartbeat_loop(self) -> None:
         # Mirror Plugin.cs HeartbeatLoop: quiet fixed ping, no event spam.
         while not self._hb_stop.is_set():
-            try:
-                body = json.dumps({
-                    "type": "heartbeat", "bridge": "planner", "version": SIM_VERSION,
-                    "uptime_s": round(time.time() - self.state.started_at, 1),
-                    "game_running": True, "stopping": False,
-                    "spawned_planner": False, "planner_restarts": 0,
-                }).encode()
-                req = urllib.request.Request(
-                    self._planner_url.rstrip("/") + "/api/bridge/heartbeat",
-                    data=body, headers={"Content-Type": "application/json"}, method="POST")
-                with urllib.request.urlopen(req, timeout=0.9) as r:
-                    r.read()
-            except Exception:
-                pass  # planner not running — same as the real bridge
+            self._send_beat(stopping=False)
             self._hb_stop.wait(self._heartbeat_interval)
 
 
