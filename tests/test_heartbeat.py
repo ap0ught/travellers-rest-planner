@@ -25,6 +25,7 @@ def reset_heartbeat():
 def test_no_heartbeat_means_save_only(client):
     reset_heartbeat()
     assert not app_module._bridge_live()
+    assert app_module._live_reason() == "no_bridge"
 
 
 def test_heartbeat_sets_live(client):
@@ -33,15 +34,18 @@ def test_heartbeat_sets_live(client):
     assert r.status_code == 200
     assert r.json()["live"] is True
     assert app_module._bridge_live()
+    assert app_module._live_reason() == "live"
 
 
 def test_heartbeat_timeout_drops_to_save_only(client):
     reset_heartbeat()
     client.post("/api/bridge/heartbeat", json={})
     assert app_module._bridge_live()
-    # backdate past the timeout (~3 missed beats) -> save-only
+    # backdate past the timeout (~3 missed beats) -> save-only, and the
+    # reason distinguishes beat_lost (was live) from no_bridge (never seen)
     app_module._bridge_last_beat = time.time() - (HEARTBEAT_TIMEOUT_S + 1.0)
     assert not app_module._bridge_live()
+    assert app_module._live_reason() == "beat_lost"
 
 
 def test_status_carries_heartbeat_fields_even_when_bridge_http_down(client, monkeypatch):
@@ -55,6 +59,7 @@ def test_status_carries_heartbeat_fields_even_when_bridge_http_down(client, monk
     assert "live" in j
     assert "heartbeat_age_s" in j
     assert j["heartbeat_timeout_s"] == HEARTBEAT_TIMEOUT_S
+    assert j["reason"] == "no_bridge"  # never saw a beat (reset above)
 
 
 def test_share_mode_heartbeat_local_only(client, monkeypatch):

@@ -44,7 +44,9 @@ game is up — it (not the planner) is the liveness authority.
 **Liveness protocol (heartbeat):** the bridge posts a periodic heartbeat to
 the planner (`:8765`); the planner derives "live" purely from heartbeat
 presence — first heartbeat → live; heartbeat timeout → drop to save-only
-gracefully. No heartbeat has never existed yet (see G0).
+gracefully, with a **reason** (`live` / `no_bridge` / `beat_lost`) so the UI
+stays quiet about "game closed" but loud about a lost beat (see DEG-1).
+Implemented — see G0.
 
 **State matrix:**
 
@@ -181,6 +183,26 @@ gracefully. No heartbeat has never existed yet (see G0).
   poll now prefers the heartbeat `live` field (also kept on 503 payloads)
   over raw proxy success.
 
+### DEG-1 — Degraded state not surfaced (bridge down while game up) ✅ (accepted-merge variant)
+- **Was:** silently fell back to save data regardless of why the bridge was
+  absent; user was never told anything.
+- **Fix:** `live_status` and `/api/bridge/status` now carry a **reason**:
+  `live` (beats fresh), `no_bridge` (never saw a beat — game closed, the
+  NORMAL state, UI stays quiet "save-only"), `beat_lost` (we HAD beats and
+  they stopped — amber "bridge lost" pill + toast: *"save-only mode. If the
+  game is still running, check BepInEx/LogOutput.log"*). Single-file UI:
+  amber `.ws-pill.lost` state; React: badge text + error toast.
+- **Verified in-browser** against the simulator: badge flips
+  "bridge live · 2 req" → "bridge lost — check BepInEx log" with the toast
+  on beat loss; tests assert the no_bridge → live → beat_lost reason
+  transitions.
+- **Inherent limitation (accepted):** a crashed bridge cannot report
+  anything, so heartbeat loss alone can't distinguish "game closed" from
+  "bridge crashed while game up" — `beat_lost` covers both with a hint
+  pointing at the BepInEx log. True row-3 detection would need an
+  independent game-process signal (e.g. a supervisor outside the game
+  process); deferred unless it proves annoying in practice.
+
 ## 4. Open gaps (issue-ready)
 
 ### LV-1 — Live-vs-save provenance only on inventory; UI never renders it
@@ -205,22 +227,6 @@ gracefully. No heartbeat has never existed yet (see G0).
 - **Effort:** **L**. **Depends-on:** G0, G1, EV-1 (deltas arrive as bridge
   events).
 - **Files:** `planner/server/app.py` (new), `planner/server/static.py`.
-
-### DEG-1 — Degraded state not surfaced (bridge down while game up) — narrowed
-- **Vision:** state matrix row 3 — a loud, explicit "bridge should be up"
-  error, distinct from the normal save-only state.
-- **Now:** G0/G1 landed the live-vs-save-only distinction with a visible
-  badge, so the *normal* state is properly quiet. What remains is row 3
-  specifically: heartbeat loss currently reads identically for "game
-  closed" (normal) and "bridge crashed while the game is up" (error), since
-  a crashed bridge cannot report anything. Distinguishing them needs an
-  independent game-liveness signal (e.g. the bridge watching the game
-  process from a separate supervisor, or the planner detecting the game
-  process) — or accepting the merge into one "connection lost" state with a
-  hint pointing at `BepInEx/LogOutput.log`.
-- **Effort:** **S** (accept merge + hint) / **M** (true row-3 detection).
-  **Depends-on:** G0 ✅, G1 ✅.
-- **Files:** `planner/server/app.py`, `planner/server/static.py`.
 
 ### TST-1 — No tests for the new contracts
 - **Vision:** tests for heartbeat/mode transitions, before/after verification
@@ -247,7 +253,8 @@ gracefully. No heartbeat has never existed yet (see G0).
 1. ~~**EV-1** (S) — quick win; makes MUT-2's before/after visible in the UI.~~ ✅ done
 2. ~~**SEC-1** (M) — sharing is exposed today.~~ ✅ done
 3. ~~**G0** (L) — heartbeat + bridge-spawns-planner.~~ ✅ done (planner side proven via simulator; one in-game DLL check pending)
-4. ~~**G1** (M) — mode + `live_status` badge.~~ ✅ done → **DEG-1** (S/M) — row-3 distinction or accepted merge + hint
-5. **LV-1** (L) — provenance badges everywhere.
-6. **SLS-1** (L) — since-last-save tracker.
-7. **TST-1** (S/M) — WS broadcast test + live happy-path update with the game.
+4. ~~**G1** (M) — mode + `live_status` badge.~~ ✅ done
+5. ~~**DEG-1** — beat_lost vs no_bridge distinction + hint.~~ ✅ done (accepted-merge variant; true row-3 detection deferred)
+6. **LV-1** (L) — provenance badges everywhere.
+7. **SLS-1** (L) — since-last-save tracker.
+8. **TST-1** (S/M) — WS broadcast test + live happy-path update with the game.

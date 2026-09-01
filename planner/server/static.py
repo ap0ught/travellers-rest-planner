@@ -263,6 +263,9 @@ header.spine .row {
 }
 .ws-pill.dead { color: var(--burgundy); border-color: var(--burgundy); }
 .ws-pill.dead::before { background: var(--burgundy); }
+/* DEG-1: heartbeat was live and stopped — louder than save-only, softer than error */
+.ws-pill.lost { color: var(--copper); border-color: var(--copper); background: rgba(168, 90, 26, 0.10); }
+.ws-pill.lost::before { background: var(--copper-bright); }
 
 /* bridge event toasts — realtime confirmations pushed from the in-game bridge */
 #bridgeToasts {
@@ -3829,13 +3832,20 @@ function connectWS() {
           setTimeout(loadAll, 250);
         }
         if (m.type === "live_status") {
-          // Bridge heartbeat flipped: live (green) vs save-only (quiet —
-          // game closed is the NORMAL state, so no alarm colour).
+          // Bridge heartbeat flipped. Three states (DEG-1): live (green),
+          // no_bridge (quiet save-only — game closed is NORMAL), beat_lost
+          // (amber — we had beats and they stopped; if the game is still
+          // running, the bridge died: check BepInEx/LogOutput.log).
           const p = $("#live-pill");
           if (p) {
             p.classList.toggle("live", !!m.live);
+            p.classList.toggle("lost", m.reason === "beat_lost");
             p.classList.remove("dead");
-            p.textContent = m.live ? "live" : "save-only";
+            p.textContent = m.live ? "live" : (m.reason === "beat_lost" ? "bridge lost" : "save-only");
+            if (m.reason === "beat_lost")
+              p.title = "bridge heartbeat lost — save-only mode. If the game is still running, check BepInEx/LogOutput.log";
+            else
+              p.title = "bridge heartbeat: live game vs save-only";
           }
         }
         if (m.type === "cart_updated" && m.slot === STATE.slot) {
@@ -3861,11 +3871,15 @@ async function boot() {
   STATE.languages = await jget("/api/languages").catch(() => []);
   if (STATE.saves.length) STATE.slot = STATE.saves[0].slot_id;
 
-  // Initial live-mode pill (bridge heartbeat). 503/no-bridge = save-only,
-  // which is the normal state when the game is closed — stays quiet.
-  jget("/api/bridge/status").then(s => {
+  // Initial live-mode pill from /api/bridge/status (raw fetch: the 503
+  // "bridge down" payload still carries live/reason). no_bridge = quiet
+  // save-only (normal); beat_lost = amber.
+  fetch("/api/bridge/status").then(r => r.json().catch(() => null)).then(s => {
     const p = $("#live-pill");
-    if (p && s && s.live) { p.classList.add("live"); p.textContent = "live"; }
+    if (!p || !s) return;
+    p.classList.toggle("live", !!s.live);
+    p.classList.toggle("lost", s.reason === "beat_lost");
+    p.textContent = s.live ? "live" : (s.reason === "beat_lost" ? "bridge lost" : "save-only");
   }).catch(() => {});
 
   $("#slot").innerHTML = STATE.saves.map(s =>

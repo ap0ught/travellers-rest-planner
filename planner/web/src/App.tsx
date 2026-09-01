@@ -391,8 +391,13 @@ export default function App() {
             setTimeout(reload, 150);
             setTimeout(() => fetchDebugSaves().then(setDebugSaves).catch(()=>{}), 600);
           } else if (m.type === "live_status") {
-            // Bridge heartbeat flipped (G0): live vs save-only, instant.
+            // Bridge heartbeat flipped (G0) with a reason (DEG-1): live,
+            // no_bridge (quiet — game closed is normal), beat_lost (loud —
+            // we had beats and they stopped).
             setBridgeLive(!!m.live);
+            setBridgeDebug((prev: any) => ({ ...(prev ?? {}), reason: m.reason }));
+            if (m.reason === "beat_lost")
+              pushToast("error", "✗ Bridge heartbeat lost — save-only mode. If the game is still running, check BepInEx/LogOutput.log");
           } else if (m.type === "cart_updated" || m.type === "menu_updated") {
             pushToast("save", `${m.type}`);
           }
@@ -449,7 +454,11 @@ export default function App() {
           {wsLive ? "watcher live" : "watcher offline"}
         </span>
         <span className={"ws-status " + (bridgeLive ? "live" : "dead")} title={bridgeDebug ? `BepInEx bridge ${bridgeDebug.version ?? ""} uptime ${Math.round(bridgeDebug.uptime_s ?? 0)}s, ${bridgeDebug.requests ?? 0} req` : "BepInEx bridge (8766) — realtime buy/sell, in-game overlay F8"}>
-          {bridgeLive ? `bridge live${bridgeDebug?.requests ? " · " + bridgeDebug.requests + " req" : ""}` : "bridge offline"}
+          {bridgeLive
+            ? `bridge live${bridgeDebug?.requests ? " · " + bridgeDebug.requests + " req" : ""}`
+            : bridgeDebug?.reason === "beat_lost"
+            ? "bridge lost — check BepInEx log"
+            : "bridge offline"}
         </span>
       </header>
 

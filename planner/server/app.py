@@ -275,8 +275,21 @@ def _bridge_live() -> bool:
     return (time.time() - _bridge_last_beat) < _heartbeat_timeout_s()
 
 
+def _live_reason() -> str:
+    """Why we are (not) live — DEG-1's distinction:
+    'live'       — heartbeats fresh
+    'beat_lost'  — we HAD beats and they stopped: bridge crashed or game quit;
+                   if the game is still up this is the degraded state
+    'no_bridge'  — never saw a beat: game simply not running (normal)."""
+    if _bridge_live():
+        return "live"
+    return "beat_lost" if _bridge_last_beat > 0 else "no_bridge"
+
+
 async def _live_status_watcher():
-    """Broadcast live_status over /ws whenever live mode flips (G1)."""
+    """Broadcast live_status over /ws whenever live mode flips (G1), with a
+    reason so the UI can be quiet about 'no bridge' but loud about a lost
+    beat (DEG-1)."""
     last_live: bool | None = None
     while True:
         await asyncio.sleep(1.0)
@@ -288,9 +301,10 @@ async def _live_status_watcher():
                 await manager.broadcast({
                     "type": "live_status",
                     "live": live,
+                    "reason": _live_reason(),
                     "heartbeat_age_s": round(age, 1) if age is not None else None,
                 })
-                print(f"[planner] live_status: {'live (bridge heartbeat fresh)' if live else 'save-only (no bridge heartbeat)'}", flush=True)
+                print(f"[planner] live_status: {_live_reason()}", flush=True)
             except Exception:
                 pass
 
@@ -1231,6 +1245,7 @@ async def api_bridge_status():
     live = _bridge_live()
     heartbeat = {
         "live": live,
+        "reason": _live_reason(),
         "heartbeat_age_s": round(time.time() - _bridge_last_beat, 1) if _bridge_last_beat else None,
         "heartbeat_timeout_s": _heartbeat_timeout_s(),
         **({"bridge_info": _bridge_last_info} if _bridge_last_info else {}),

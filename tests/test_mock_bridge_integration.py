@@ -157,6 +157,7 @@ def test_full_stack_heartbeat_flips_live_mode(monkeypatch):
 
         # No bridge at all -> save-only (the normal state, not an error)
         assert status()["live"] is False
+        assert status()["reason"] == "no_bridge"
 
         sim = MockBridge(port=0, heartbeat=True, heartbeat_interval=0.3,
                          planner_url=planner_url, push_events=False).start()
@@ -166,9 +167,11 @@ def test_full_stack_heartbeat_flips_live_mode(monkeypatch):
 
             # Heartbeat stops, but the sim's HTTP keeps answering: mode must
             # still drop to save-only — heartbeat is the authority, not
-            # reachability (the G0 invariant).
+            # reachability (the G0 invariant). And the reason distinguishes
+            # beat_lost (was live) from no_bridge (never seen) — DEG-1.
             sim.stop_heartbeat()
             assert wait_until(lambda: status()["live"] is False), "stale heartbeat never dropped to save-only"
+            assert status()["reason"] == "beat_lost"
             with urllib.request.urlopen(sim.url + "/ping", timeout=2) as r:
                 assert json.loads(r.read())["ok"] is True
         finally:
