@@ -21,9 +21,8 @@ from PIL import Image
 import UnityPy
 UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.0"
 
-import sys as _sys, os as _os
-_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-from planner.gamepath import find_game_data_dir; GAME = find_game_data_dir()
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from planner.gamepath import find_game_data_dir
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT  = os.path.join(ROOT, "data", "maps")
 META = os.path.join(ROOT, "data", "maps.json")
@@ -90,35 +89,70 @@ def game_object_info(level_objs):
 
 
 def transform_info(level_objs, owners, transforms):
-    """Return parent GameObjects and accumulated world positions."""
+    """Return parent GameObjects and accumulated 2D world transforms."""
     parents = {}
-    local_positions = {}
+    local_transforms = {}
     for go_id, transform_id in transforms.items():
         data = object_data(level_objs[transform_id])
-        pos = data.get("m_LocalPosition") or {}
-        local_positions[go_id] = (float(pos.get("x", 0)), float(pos.get("y", 0)))
+        local_transforms[go_id] = affine_from_transform(
+            data.get("m_LocalPosition") or {}, data.get("m_LocalRotation") or {},
+            data.get("m_LocalScale") or {},
+        )
         father_id = ref_path_id(data.get("m_Father") or {})
         parents[go_id] = owners.get(father_id) if father_id else None
 
     world_cache = {}
 
-    def world_position(go_id, seen=None):
+    def world_transform(go_id, seen=None):
         if go_id in world_cache:
             return world_cache[go_id]
         seen = seen or set()
         if go_id in seen:
-            return local_positions.get(go_id, (0.0, 0.0))
+            return local_transforms.get(go_id, IDENTITY_AFFINE)
         seen.add(go_id)
-        x, y = local_positions.get(go_id, (0.0, 0.0))
+        result = local_transforms.get(go_id, IDENTITY_AFFINE)
         parent = parents.get(go_id)
         if parent:
-            px, py = world_position(parent, seen)
-            x += px
-            y += py
-        world_cache[go_id] = (x, y)
-        return x, y
+            result = affine_compose(world_transform(parent, seen), result)
+        world_cache[go_id] = result
+        return result
 
-    return parents, world_position
+    return parents, world_transform
+
+
+IDENTITY_AFFINE = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def affine_from_transform(position, rotation, scale):
+    import math
+
+    qx, qy = float(rotation.get("x", 0)), float(rotation.get("y", 0))
+    qz, qw = float(rotation.get("z", 0)), float(rotation.get("w", 1))
+    angle = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+    cosine, sine = math.cos(angle), math.sin(angle)
+    sx, sy = float(scale.get("x", 1)), float(scale.get("y", 1))
+    return (cosine * sx, sine * sx, -sine * sy, cosine * sy,
+            float(position.get("x", 0)), float(position.get("y", 0)))
+
+
+def affine_compose(parent, child):
+    pa, pb, pc, pd, ptx, pty = parent
+    ca, cb, cc, cd, ctx, cty = child
+    return (pa * ca + pc * cb, pb * ca + pd * cb,
+            pa * cc + pc * cd, pb * cc + pd * cd,
+            pa * ctx + pc * cty + ptx, pb * ctx + pd * cty + pty)
+
+
+def affine_point(transform, x, y):
+    a, b, c, d, tx, ty = transform
+    return a * x + c * y + tx, b * x + d * y + ty
+
+
+def transformed_bounds(transform, left, bottom, right, top):
+    points = [affine_point(transform, x, y) for x, y in
+              ((left, bottom), (right, bottom), (left, top), (right, top))]
+    return (min(x for x, _ in points), min(y for _, y in points),
+            max(x for x, _ in points), max(y for _, y in points))
 
 
 def active_in_hierarchy(go_id, parents, active):
@@ -165,10 +199,76 @@ def decode_tilemap_sprites(tilemaps, resolve_ref):
             key = (data.get("m_FileID", 0), data.get("m_PathID", 0))
             if key not in cache:
                 obj = resolve_ref(*key)
-                cache[key] = load_sprite_image(obj) if obj is not None and obj.type.name == "Sprite" else None
+                cache[key] = load_sprite(obj) if obj is not None and obj.type.name == "Sprite" else None
             decoded.append(cache[key])
         decoded_by_object[tm_info["object"].path_id] = decoded
     return decoded_by_object
+
+
+def load_sprite(obj):
+    data = object_data(obj)
+    image = load_sprite_image(obj)
+    if image is None:
+        return None
+    pivot = data.get("m_Pivot") or {"x": 0.5, "y": 0.5}
+    return (image, float(pivot.get("x", 0.5)), float(pivot.get("y", 0.5)),
+            float(data.get("m_PixelsToUnits", 100) or 100))
+
+
+def composite_clipped(canvas, image, x, y):
+    left, top = max(0, x), max(0, y)
+    right, bottom = min(canvas.width, x + image.width), min(canvas.height, y + image.height)
+    if left >= right or top >= bottom:
+        return False
+    canvas.alpha_composite(image.crop((left - x, top - y, right - x, bottom - y)),
+                           (left, top))
+    return True
+
+
+def composite_world_sprite(canvas, sprite, transform, bounds, pixels_per_world,
+                           flip_x=False, flip_y=False):
+    image, pivot_x, pivot_y, sprite_ppu = sprite
+    world_w, world_h = image.width / sprite_ppu, image.height / sprite_ppu
+    if flip_x:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    if flip_y:
+        image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    left, bottom = -pivot_x * world_w, -pivot_y * world_h
+    extent = transformed_bounds(transform, left, bottom, left + world_w, bottom + world_h)
+    min_x, min_y, max_x, max_y = bounds
+    if extent[2] <= min_x or extent[0] >= max_x or extent[3] <= min_y or extent[1] >= max_y:
+        return False
+
+    a, b, c, d, tx, ty = transform
+    if abs(b) < 1e-12 and abs(c) < 1e-12:
+        width = max(1, round(world_w * abs(a) * pixels_per_world))
+        height = max(1, round(world_h * abs(d) * pixels_per_world))
+        if image.size != (width, height):
+            image = image.resize((width, height), Image.Resampling.NEAREST)
+        if a < 0:
+            image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        if d < 0:
+            image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        x = round((extent[0] - min_x) * pixels_per_world)
+        y = round((max_y - extent[3]) * pixels_per_world)
+        return composite_clipped(canvas, image, x, y)
+
+    scale = pixels_per_world / sprite_ppu
+    fa, fc = a * scale, -c * scale
+    fb, fd = -b * scale, d * scale
+    ftx = (tx + left * a + (bottom + world_h) * c - min_x) * pixels_per_world
+    fty = (max_y - ty - left * b - (bottom + world_h) * d) * pixels_per_world
+    determinant = fa * fd - fb * fc
+    if abs(determinant) < 1e-12:
+        return False
+    inverse = (fd / determinant, -fc / determinant,
+               (fc * fty - fd * ftx) / determinant,
+               -fb / determinant, fa / determinant,
+               (fb * ftx - fa * fty) / determinant)
+    warped = image.transform(canvas.size, Image.Transform.AFFINE, inverse,
+                             resample=Image.Resampling.NEAREST)
+    canvas.alpha_composite(warped)
+    return bool(warped.getbbox())
 
 
 def largest_connected_cells(tilemaps):
@@ -205,12 +305,12 @@ def primary_world_cluster(tilemaps, nearby_distance=50.0):
     occupied = set()
     for tm in tilemaps:
         grid = tm["grid"]
-        ox, oy = tm["world_position"]
+        transform = tm["world_transform"]
         for entry in tm["data"].get("m_Tiles") or []:
             pos, _ = split_tile(entry)
             if isinstance(pos, dict):
-                x = ox + float(pos.get("x", 0)) * grid["cell_x"]
-                y = oy + float(pos.get("y", 0)) * grid["cell_y"]
+                x, y = affine_point(transform, float(pos.get("x", 0)) * grid["cell_x"],
+                                    float(pos.get("y", 0)) * grid["cell_y"])
                 occupied.add((round(x * 2), round(y * 2)))
 
     components = []
@@ -253,7 +353,6 @@ def primary_world_cluster(tilemaps, nearby_distance=50.0):
 
 
 def composite_sprite_renderers(canvas, renderers, resolve_ref, bounds, pixels_per_world, root_path):
-    min_x, min_y, max_x, max_y = bounds
     cache = {}
     drawn = 0
     for renderer in sorted(renderers, key=lambda r: (r["layer"], r["order"], -r["world_position"][1])):
@@ -268,42 +367,19 @@ def composite_sprite_renderers(canvas, renderers, resolve_ref, bounds, pixels_pe
             if obj is None or obj.type.name != "Sprite":
                 cache[key] = None
             else:
-                sprite_data = object_data(obj)
-                image = load_sprite_image(obj)
-                pivot = sprite_data.get("m_Pivot") or {"x": 0.5, "y": 0.5}
-                ppu = float(sprite_data.get("m_PixelsToUnits", 100) or 100)
-                cache[key] = (image, float(pivot.get("x", 0.5)), float(pivot.get("y", 0.5)), ppu)
+                cache[key] = load_sprite(obj)
         sprite = cache[key]
-        if not sprite or sprite[0] is None:
+        if not sprite:
             continue
-        image, pivot_x, pivot_y, sprite_ppu = sprite
-        world_w = image.width / sprite_ppu
-        world_h = image.height / sprite_ppu
-        x, y = renderer["world_position"]
-        left = x - pivot_x * world_w
-        bottom = y - pivot_y * world_h
-        right = left + world_w
-        top = bottom + world_h
-        if right <= min_x or left >= max_x or top <= min_y or bottom >= max_y:
-            continue
-        width = max(1, round(world_w * pixels_per_world))
-        height = max(1, round(world_h * pixels_per_world))
-        image = image.resize((width, height), Image.Resampling.NEAREST)
-        if renderer["data"].get("m_FlipX"):
-            image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-        if renderer["data"].get("m_FlipY"):
-            image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-        px = round((left - min_x) * pixels_per_world)
-        py = round((max_y - top) * pixels_per_world)
-        if px < 0 or py < 0 or px + width > canvas.width or py + height > canvas.height:
-            continue
-        canvas.alpha_composite(image, (px, py))
-        drawn += 1
+        if composite_world_sprite(canvas, sprite, renderer["world_transform"], bounds,
+                                  pixels_per_world, renderer["data"].get("m_FlipX"),
+                                  renderer["data"].get("m_FlipY")):
+            drawn += 1
     return drawn
 
 
 def render_grid_regions(scene_name, tilemaps, sprite_renderers, resolve_ref):
-    if scene_name not in ("level2", "level12"):
+    if scene_name not in ("level2", "level12", "level18"):
         return None
     grouped = defaultdict(list)
     for tm in tilemaps:
@@ -317,8 +393,12 @@ def render_grid_regions(scene_name, tilemaps, sprite_renderers, resolve_ref):
         return None
     if scene_name == "level12":
         grouped = {"city": [tm for group in grouped.values() for tm in group]}
+    elif scene_name == "level18":
+        castle = [tm for group in grouped.values() for tm in group
+                  if "castlegarden/commontilemaps" in tm["path"].lower()
+                  or "castlegarden/tilemapsspring" in tm["path"].lower()]
+        grouped = {"castle-garden": castle} if castle else {}
 
-    decoded = decode_tilemap_sprites(tilemaps, resolve_ref)
     regions = []
     for grid_id, group in grouped.items():
         grid = group[0]["grid"]
@@ -333,7 +413,7 @@ def render_grid_regions(scene_name, tilemaps, sprite_renderers, resolve_ref):
         tile_count = 0
         for tm in group:
             tm_grid = tm["grid"]
-            ox, oy = tm["world_position"]
+            transform = tm["world_transform"]
             for entry in tm["data"].get("m_Tiles") or []:
                 pos, _ = split_tile(entry)
                 if not isinstance(pos, dict):
@@ -341,14 +421,16 @@ def render_grid_regions(scene_name, tilemaps, sprite_renderers, resolve_ref):
                 cell = (int(pos.get("x", 0)), int(pos.get("y", 0)))
                 if allowed_cells is not None and cell not in allowed_cells:
                     continue
-                x = ox + float(pos.get("x", 0)) * tm_grid["cell_x"]
-                y = oy + float(pos.get("y", 0)) * tm_grid["cell_y"]
+                local_x = float(pos.get("x", 0)) * tm_grid["cell_x"]
+                local_y = float(pos.get("y", 0)) * tm_grid["cell_y"]
+                x, y = affine_point(transform, local_x, local_y)
                 if allowed_world_cells is not None and (round(x * 2), round(y * 2)) not in allowed_world_cells:
                     continue
-                min_x = min(min_x, x)
-                min_y = min(min_y, y)
-                max_x = max(max_x, x + tm_grid["cell_x"])
-                max_y = max(max_y, y + tm_grid["cell_y"])
+                extent = transformed_bounds(transform, local_x, local_y,
+                                            local_x + tm_grid["cell_x"],
+                                            local_y + tm_grid["cell_y"])
+                min_x, min_y = min(min_x, extent[0]), min(min_y, extent[1])
+                max_x, max_y = max(max_x, extent[2]), max(max_y, extent[3])
                 tile_count += 1
         if not tile_count:
             continue
@@ -359,10 +441,12 @@ def render_grid_regions(scene_name, tilemaps, sprite_renderers, resolve_ref):
         pixel_w = max(1, min(MAX_OUTPUT_DIM, round(width_world * pixels_per_world)))
         pixel_h = max(1, min(MAX_OUTPUT_DIM, round(height_world * pixels_per_world)))
         canvas = Image.new("RGBA", (pixel_w, pixel_h), (0, 0, 0, 0))
+        decoded = decode_tilemap_sprites(group, resolve_ref)
         drawn = 0
         for tm in group:
             tm_grid = tm["grid"]
-            ox, oy = tm["world_position"]
+            transform = tm["world_transform"]
+            anchor_x, anchor_y = tm["tile_anchor"]
             sprites = decoded.get(tm["object"].path_id, [])
             for entry in tm["data"].get("m_Tiles") or []:
                 pos, data = split_tile(entry)
@@ -371,29 +455,27 @@ def render_grid_regions(scene_name, tilemaps, sprite_renderers, resolve_ref):
                 cell = (int(pos.get("x", 0)), int(pos.get("y", 0)))
                 if allowed_cells is not None and cell not in allowed_cells:
                     continue
-                world_x = ox + float(pos.get("x", 0)) * tm_grid["cell_x"]
-                world_y = oy + float(pos.get("y", 0)) * tm_grid["cell_y"]
+                local_x = float(pos.get("x", 0)) * tm_grid["cell_x"]
+                local_y = float(pos.get("y", 0)) * tm_grid["cell_y"]
+                world_x, world_y = affine_point(transform, local_x, local_y)
                 if allowed_world_cells is not None and (round(world_x * 2), round(world_y * 2)) not in allowed_world_cells:
                     continue
                 sprite_index = data.get("m_TileSpriteIndex", -1)
                 if sprite_index < 0 or sprite_index >= len(sprites) or sprites[sprite_index] is None:
                     continue
-                img = sprites[sprite_index]
-                cell_w = max(1, round(tm_grid["cell_x"] * pixels_per_world))
-                cell_h = max(1, round(tm_grid["cell_y"] * pixels_per_world))
-                if img.size != (cell_w, cell_h):
-                    img = img.resize((cell_w, cell_h), Image.Resampling.NEAREST)
-                px = round((world_x - min_x) * pixels_per_world)
-                py = round((max_y - world_y - tm_grid["cell_y"]) * pixels_per_world)
-                if 0 <= px <= pixel_w - cell_w and 0 <= py <= pixel_h - cell_h:
-                    canvas.alpha_composite(img, (px, py))
+                sprite_transform = affine_compose(transform, (
+                    1, 0, 0, 1, local_x + anchor_x * tm_grid["cell_x"],
+                    local_y + anchor_y * tm_grid["cell_y"],
+                ))
+                if composite_world_sprite(canvas, sprites[sprite_index], sprite_transform,
+                                          (min_x, min_y, max_x, max_y), pixels_per_world):
                     drawn += 1
         root_path = grid["path"].split("/", 1)[0]
         drawn_sprites = composite_sprite_renderers(
             canvas, sprite_renderers, resolve_ref,
             (min_x, min_y, max_x, max_y), pixels_per_world, root_path,
         )
-        if not drawn:
+        if not drawn and not drawn_sprites:
             continue
 
         image_name = f"{scene_name}--grid-{grid_id}.png"
@@ -403,6 +485,8 @@ def render_grid_regions(scene_name, tilemaps, sprite_renderers, resolve_ref):
             label = "Tavern exterior"
         elif scene_name == "level12":
             label = "City"
+        elif scene_name == "level18":
+            label = "Castle Garden"
         regions.append({
             "id": f"grid-{grid_id}",
             "label": label,
@@ -475,7 +559,7 @@ def render_scene(env, scene_name, all_objs_by_pid) -> dict | None:
         return sf.objects.get(path_id)
 
     owners, names, active, transforms = game_object_info(level_objs)
-    parents, world_position = transform_info(level_objs, owners, transforms)
+    parents, world_transform = transform_info(level_objs, owners, transforms)
 
     grids = {}
     for obj in level_objs.values():
@@ -521,7 +605,12 @@ def render_scene(env, scene_name, all_objs_by_pid) -> dict | None:
             "path": object_path(go_id, parents, names) if go_id else "",
             "grid": nearest_grid(go_id),
             "active": active_in_hierarchy(go_id, parents, active),
-            "world_position": world_position(go_id) if go_id else (0.0, 0.0),
+            "world_transform": world_transform(go_id) if go_id else IDENTITY_AFFINE,
+            "world_position": affine_point(world_transform(go_id), 0, 0) if go_id else (0.0, 0.0),
+            "tile_anchor": (
+                float((t.get("m_TileAnchor") or {}).get("x", 0.5)),
+                float((t.get("m_TileAnchor") or {}).get("y", 0.5)),
+            ),
         })
 
     if not tilemaps:
@@ -539,7 +628,8 @@ def render_scene(env, scene_name, all_objs_by_pid) -> dict | None:
             "object": obj,
             "data": data,
             "path": object_path(go_id, parents, names),
-            "world_position": world_position(go_id),
+            "world_transform": world_transform(go_id),
+            "world_position": affine_point(world_transform(go_id), 0, 0),
             "layer": int(data.get("m_SortingLayer", 0) or 0),
             "order": int(data.get("m_SortingOrder", 0) or 0),
         })
@@ -662,7 +752,7 @@ def main():
         target = {f"level{i}" for i in range(28)}
 
     print(f"[maps] loading full game env...", file=sys.stderr)
-    env = UnityPy.load(GAME)
+    env = UnityPy.load(find_game_data_dir())
     print(f"[maps] {len(env.files)} files loaded", file=sys.stderr)
 
     metas = {}

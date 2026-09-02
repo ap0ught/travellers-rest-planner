@@ -1,5 +1,3 @@
-import os
-
 from planner.parser.saves import saves_root
 
 
