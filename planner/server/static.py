@@ -1962,7 +1962,7 @@ const STATE = {
     perks:    { mode: "player" },
     fish:     { filter: "" },
     foraging: { filter: "" },
-    map:      { layer: "all", scene: "all" },
+    map:      { layer: "all", scene: "all", region: null },
     menu:     { filter: "" },  // picks synced server-side via /api/menu
     shopping: { filter: "" },  // cart is now server-side, synced via /api/cart
   },
@@ -3258,6 +3258,12 @@ function renderMap() {
     const lbl = s === "all" ? "all scenes" : `${s}  (${sceneCounts[s] || 0} pts)`;
     return `<option value="${s}" ${u.scene === s ? 'selected' : ''}>${lbl}</option>`;
   }).join("");
+  const sceneMeta = (STATE.data.maps || {})[u.scene];
+  const regions = sceneMeta?.regions || [];
+  if (regions.length && !regions.some(r => r.id === u.region)) u.region = regions[0].id;
+  const regionOpts = regions.map(r =>
+    `<option value="${esc(r.id)}" ${u.region === r.id ? 'selected' : ''}>${esc(r.label)}</option>`
+  ).join("");
   const counts = {
     trees: (h.trees || []).length,
     foraging: (h.foraging || []).length,
@@ -3270,6 +3276,7 @@ function renderMap() {
     <div class="map-controls">
       <div class="pill-group">${layerBtns}</div>
       <select id="mapSceneSel">${sceneOpts}</select>
+      ${regions.length > 1 ? `<select id="mapRegionSel">${regionOpts}</select>` : ""}
       <div class="legend">
         <span class="lg-item"><span class="dot tree"></span>tree (${counts.trees})</span>
         <span class="lg-item"><span class="dot bush"></span>foraging (${counts.foraging})</span>
@@ -3286,11 +3293,11 @@ function renderMap() {
 }
 // Cached background images per scene
 const MAP_IMG_CACHE = {};
-function loadMapImage(scene) {
-  if (MAP_IMG_CACHE[scene]) return MAP_IMG_CACHE[scene];
+function loadMapImage(path) {
+  if (MAP_IMG_CACHE[path]) return MAP_IMG_CACHE[path];
   const img = new Image();
-  img.src = `/maps/${scene}.png`;
-  MAP_IMG_CACHE[scene] = img;
+  img.src = `/maps/${path}`;
+  MAP_IMG_CACHE[path] = img;
   img.onload = () => { drawMap(); };
   return img;
 }
@@ -3312,17 +3319,23 @@ function drawMap() {
 
   // Map metadata for the selected scene (only when we render a single scene
   // do we use the rendered tilemap as a background)
-  const meta = (u.scene !== "all") ? maps[u.scene] : null;
+  const sceneMeta = (u.scene !== "all") ? maps[u.scene] : null;
+  const regions = sceneMeta?.regions || [];
+  const region = regions.find(r => r.id === u.region) || regions[0] || null;
+  const meta = region || sceneMeta;
+  const worldSpace = meta?.coordinate_space === "world";
 
-  // Collect points. Hotspot positions are in PIXELS; tilemap world bounds
-  // are in TILE UNITS, so convert by dividing by ppu when we have a map.
+  // Regional maps use Unity world coordinates, matching hotspot extraction.
+  // Legacy maps retain their historical tile-coordinate conversion.
   const ppu = meta ? meta.ppu : 16;
   const points = [];
   for (const layer of layers) {
     for (const p of (h[layer] || [])) {
       if (u.scene !== "all" && p.scene !== u.scene) continue;
-      const px = meta ? p.x / ppu : p.x;
-      const py = meta ? p.y / ppu : p.y;
+      if (region && (p.x < region.world_min_x || p.x >= region.world_max_x ||
+                     p.y < region.world_min_y || p.y >= region.world_max_y)) continue;
+      const px = worldSpace ? p.x : (meta ? p.x / ppu : p.x);
+      const py = worldSpace ? p.y : (meta ? p.y / ppu : p.y);
       points.push({ x: px, y: py, layer, scene: p.scene, raw: p });
     }
   }
@@ -3336,9 +3349,9 @@ function drawMap() {
 
   if (meta) {
     minX = meta.world_min_x;
-    maxX = meta.world_max_x + 1;
+    maxX = meta.world_max_x + (worldSpace ? 0 : 1);
     minY = meta.world_min_y;
-    maxY = meta.world_max_y + 1;
+    maxY = meta.world_max_y + (worldSpace ? 0 : 1);
     const rngX = maxX - minX, rngY = maxY - minY;
     const s = Math.min(W / rngX, H / rngY);
     bgW = rngX * s;
@@ -3350,7 +3363,7 @@ function drawMap() {
       bgY + (maxY - wy) * s,   // flip Y so up is +
     ];
 
-    const img = loadMapImage(u.scene);
+    const img = loadMapImage(region ? region.image : `${u.scene}.png`);
     if (img.complete && img.naturalWidth > 0) {
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(img, bgX, bgY, bgW, bgH);
@@ -3639,6 +3652,12 @@ function bindTab() {
     const sceneSel = $("#mapSceneSel");
     if (sceneSel) sceneSel.addEventListener("change", () => {
       STATE.ui.map.scene = sceneSel.value;
+      STATE.ui.map.region = null;
+      renderTab();
+    });
+    const regionSel = $("#mapRegionSel");
+    if (regionSel) regionSel.addEventListener("change", () => {
+      STATE.ui.map.region = regionSel.value;
       drawMap();
     });
   }

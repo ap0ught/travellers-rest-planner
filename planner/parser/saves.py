@@ -13,6 +13,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -53,6 +54,59 @@ DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def saves_root() -> str:
+    override = os.environ.get("TR_SAVES_DIR")
+    if override:
+        return os.path.abspath(os.path.expanduser(override.strip().strip('"').strip("'")))
+
+    relative = os.path.join(
+        "pfx", "drive_c", "users", "steamuser", "AppData", "LocalLow",
+        "Louqou", "TravellersRest", "GameSaves",
+    )
+    candidates = []
+
+    if sys.platform == "win32":
+        profile = os.environ.get("USERPROFILE")
+        if profile:
+            candidates.append(os.path.join(
+                profile, "AppData", "LocalLow", "Louqou", "TravellersRest", "GameSaves"
+            ))
+    else:
+        # TR_GAME_DIR lives under <library>/steamapps/common/...; use the same
+        # Steam library's Proton prefix when the game path is explicit.
+        game_dir = os.environ.get("TR_GAME_DIR", "")
+        parts = os.path.abspath(os.path.expanduser(game_dir)).split(os.sep) if game_dir else []
+        if "steamapps" in parts:
+            steamapps = os.sep.join(parts[:parts.index("steamapps") + 1]) or os.sep
+            candidates.append(os.path.join(steamapps, "compatdata", "1139980", relative))
+
+        for steam_root in (
+            os.path.expanduser("~/.steam/steam"),
+            os.path.expanduser("~/.local/share/Steam"),
+            os.path.expanduser("~/.steam/root"),
+        ):
+            candidates.append(os.path.join(steam_root, "steamapps", "compatdata", "1139980", relative))
+            vdf = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+            if not os.path.isfile(vdf):
+                continue
+            try:
+                with open(vdf, encoding="utf8", errors="ignore") as f:
+                    text = f.read()
+                for match in re.finditer(r'"path"\s*"([^"]+)"', text):
+                    library = match.group(1).replace("\\\\", "\\")
+                    candidates.append(os.path.join(
+                        library, "steamapps", "compatdata", "1139980", relative
+                    ))
+            except OSError:
+                pass
+
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+
+    # Preserve the historical Windows-shaped fallback for callers that start
+    # before the save directory exists.
+    if candidates:
+        return candidates[0]
     return os.path.expandvars(
         r"%USERPROFILE%\AppData\LocalLow\Louqou\TravellersRest\GameSaves"
     )
