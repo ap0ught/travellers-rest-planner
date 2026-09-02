@@ -52,11 +52,17 @@ SEASON_NAMES = ["Spring", "Summer", "Autumn", "Winter"]
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
+_PROTON_SAVE_REL = os.path.join(
+    "compatdata", "1139980", "pfx", "drive_c", "users", "steamuser",
+    "AppData", "LocalLow", "Louqou", "TravellersRest", "GameSaves",
+)
+
+
 def saves_root() -> str:
-    # 1. Explicit override
+    # 1. Explicit override always wins (may not exist yet — watchdog creates it)
     env = os.environ.get("TR_SAVES_DIR") or os.environ.get("TRAVELLERS_REST_SAVES")
-    if env and os.path.isdir(env):
-        return env
+    if env:
+        return os.path.abspath(os.path.expanduser(env.strip().strip('"').strip("'")))
     # 2. Native Windows / Wine USERPROFILE location
     win = os.path.expandvars(r"%USERPROFILE%\AppData\LocalLow\Louqou\TravellersRest\GameSaves")
     if os.path.isdir(win):
@@ -66,7 +72,16 @@ def saves_root() -> str:
     #    Probe: libraryfolders.vdf-derived libs + common steam roots
     import pathlib
     candidates: list[str] = []
-    # Parse libraryfolders.vdf for compatdata location (same lib as game install)
+    # 3a. TR_GAME_DIR is explicit -> same Steam library's Proton prefix (AppID 1139980)
+    game_dir = os.environ.get("TR_GAME_DIR", "")
+    if game_dir:
+        parts = os.path.abspath(os.path.expanduser(game_dir)).split(os.sep)
+        if "steamapps" in parts:
+            steamapps = os.sep.join(parts[:parts.index("steamapps") + 1]) or os.sep
+            derived = os.path.join(steamapps, _PROTON_SAVE_REL)
+            if os.path.isdir(derived) or os.path.isdir(os.path.dirname(derived)):
+                return derived
+    # 3b. Parse libraryfolders.vdf for compatdata location (same lib as game install)
     for vdf in [
         pathlib.Path.home() / ".steam/steam/steamapps/libraryfolders.vdf",
         pathlib.Path.home() / ".local/share/Steam/steamapps/libraryfolders.vdf",
@@ -77,17 +92,17 @@ def saves_root() -> str:
                 txt = vdf.read_text(encoding="utf-8", errors="ignore")
                 for m in re.finditer(r'"path"\s*"([^"]+)"', txt):
                     lib = m.group(1).replace("\\\\", "\\")
-                    candidates.append(os.path.join(lib, "steamapps/compatdata/1139980/pfx/drive_c/users/steamuser/AppData/LocalLow/Louqou/TravellersRest/GameSaves"))
+                    candidates.append(os.path.join(lib, "steamapps", _PROTON_SAVE_REL))
             except Exception:
                 pass
-    # Hard-known fallbacks
+    # 3c. Hard-known fallbacks
     for base in [
         os.path.expanduser("~/.steam/steam"),
         os.path.expanduser("~/.local/share/Steam"),
         "/extdrive/SteamLibrary",
         "/mnt/extdrive/SteamLibrary",
     ]:
-        candidates.append(os.path.join(base, "steamapps/compatdata/1139980/pfx/drive_c/users/steamuser/AppData/LocalLow/Louqou/TravellersRest/GameSaves"))
+        candidates.append(os.path.join(base, "steamapps", _PROTON_SAVE_REL))
     for c in candidates:
         if os.path.isdir(c):
             return c
