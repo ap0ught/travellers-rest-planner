@@ -60,6 +60,16 @@ def test_quests_have_state(client):
     assert states.issubset({"available", "active", "completed"})
 
 
+def test_quests_nameid_fallback(client):
+    # Quests with an empty nameId must fall back to the numeric quest_name_<id>
+    # i18n keys (e.g. Furry Pal, id 151) instead of showing as "quest #151".
+    qs = client.get("/api/quests?lang=English").json()
+    furry = [q for q in qs if q["quest_id"] == 151]
+    if not furry:
+        pytest.skip("Furry Pal quest missing from catalog")
+    assert furry[0]["name"] == "Furry Pal"
+
+
 def test_brewing_per_unit_math(client):
     plans = client.get("/api/brewing?lang=English").json()
     for p in plans[:10]:

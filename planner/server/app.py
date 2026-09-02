@@ -763,8 +763,12 @@ def api_quests(slot: str | None = Query(default=None),
     active_ids = set(state.quests_active.keys()) if state else set()
     out = []
     for q in cat.quests:
-        # Quest nameId is the literal i18n key (e.g. "questNamePorridge")
-        name = tr.get(q.name_id) or q.name_id or f"quest #{q.quest_id}"
+        # Quest nameId is the literal i18n key (e.g. "questNamePorridge").
+        # Some quests (e.g. pet-adoption "Furry Pal", id 151/1511) leave nameId
+        # empty and are only addressable via the numeric quest_name_<id> keys.
+        name = (tr.get(q.name_id) or q.name_id
+                or tr.get(f"quest_name_{q.quest_id}")
+                or f"quest #{q.quest_id}")
         desc = tr.get(q.description) or q.description
         state_label = "completed" if q.quest_id in completed_ids else (
                       "active" if q.quest_id in active_ids else "available")
