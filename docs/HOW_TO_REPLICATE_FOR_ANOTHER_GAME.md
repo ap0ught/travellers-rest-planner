@@ -202,9 +202,95 @@ every game patch.
 | `dump_i2l.py` | Localization terms × languages | Hand-walk the `LanguageSourceAsset` MonoBehaviours (typetree out-of-bounds) |
 | `dump_icons.py` | Item sprite PNGs | Match `Sprite.PathID` to item icon ref within the **same asset file** (avoids PathID collisions) |
 | `dump_coins.py` | Coin sprites | Sprite `m_Name` lookup in `resources.assets` |
-| `dump_hotspots.py` | Placed objects across scenes (trees, bushes, fishing, vendors) | Walk every `level*` scene, read Transform world position |
-| `dump_maps.py` | Per-scene background PNGs | Composite `Tilemap` layer data |
+| `dump_hotspots.py` | Placed objects across scenes (trees, bushes, fishing, vendors, npcs) | Walk every `level*` scene, read Transform **world** position |
+| `dump_maps.py` | Per-scene background PNGs + `data/maps.json` | Composite `Tilemap` layer data; **region-aware for aggregate scenes** (see the map pipeline below) |
 | `synthesize.py` | Joins raw mono dumps into `data/items.json`, `*.csv` | Pure Python aggregation |
+
+### The map pipeline: hotspots (world space) + tilemap PNGs, and the aggregate-scene trap
+
+Hotspots and maps are **two separate extractors** the UI joins on a canvas — and the
+whole trick is that they must agree on **coordinate space**.
+
+**Hotspots are world-space positions.** `dump_hotspots.py` writes `data/hotspots.json`:
+
+```json
+{"scenes": ["level0", ...],
+ "trees":   [{"scene": "level10", "x": -715.96, "y": 544.96, "class": "Tree"}, ...],
+ "foraging":[...], "vendors": [{"scene":"level16","x":-977.21,"y":417.08,"class":"AceTNPC","name":"AceT"}, ...],
+ "animals": [...], "fishing": [...], "npcs": [...]}
+```
+
+Every point is the GameObject Transform's **Unity world position** (affine-composed up
+its hierarchy) plus its class — and `name` where it means something (vendors, npcs).
+The top-level `scenes` list is what `dump_maps.py` uses to decide which levels to render.
+
+**Maps are rendered in one of two coordinate spaces:**
+
+- **Simple scenes** (most `levelN`): the scene's own `Tilemap` components are read
+  directly. Tiles sit at integer positions; each tile's sprite comes from
+  `m_TileSpriteArray[]` (list of `{m_Data:{m_FileID, m_PathID}}`) indexed by
+  `m_TileSpriteIndex`. Output `{scene}.png`, metadata `ppu` = pixels-per-tile (16,
+  auto-halved by `choose_ppu` under the size caps) plus `world_min/max_x/y`. This is
+  really *tile* space at `ppu` px/tile — no `coordinate_space` field, and the UI
+  divides hotspot coords by `ppu` before placing dots.
+- **Aggregate scenes** (TR: `level2` farm/tavern zone, `level12` city, `level18`
+  castle garden): the scene's own Tilemaps are **descendants of per-region `Grid`
+  GameObjects**, so the flat read produces nothing useful. `render_grid_regions()`
+  groups tilemaps by their parent **Grid's path_id**, drops non-visual layers
+  (`FunctionTilemap`, `/functional`, `/location`, `/material`, `/zones`,
+  `GameTilemaps/`), and renders **one PNG per grid**
+  (`{scene}--grid-{grid_id}.png`). In TR: level2 → Tavern exterior + 4 interiors,
+  level12 → one merged "City", level18 → "Castle Garden" only. Regions carry an
+  explicit `coordinate_space: "world"` — the UI places dots 1:1 with world coords.
+
+**Everything is composited in world space with affine transforms.**
+Each tilemap's world transform is the accumulation of its GameObject chain (local
+position/rotation/scale → a 2×2+translate affine — `affine_from_transform` /
+`affine_compose` / `affine_point` / `transformed_bounds` in `scripts/dump_maps.py`),
+cycle-guarded, so bounds, tile cells, and sprite pivots are all computed with it.
+Sprites are drawn at their pivot, NEAREST-resampled, flipped per `m_FlipX/Y`, and
+clipped to the region canvas (`composite_clipped`); rotated/sheared tilemaps are
+warped with PIL's `AFFINE` transform. After the tiles, enabled **SpriteRenderer**s
+whose GameObject hierarchy sits under the region root are composited on top, sorted
+by sorting layer/order and painter's-algorithm, so furniture/deco drawn over floor
+tiles actually appears over them.
+
+**The spawn-fragment gotcha (biggest map time-sink):** aggregate scenes can contain
+staging fragments *hundreds of world units away* from the playable map, which would
+inflate the canvas (or let one speck dominate the pixels-per-world). `TavernMap/
+Tilemaps` keeps only the **largest connected component** of occupied cells
+(`largest_connected_cells`); level12 keeps the **primary world cluster plus nearby
+chunks** (`primary_world_cluster`, within ~50 world units, ≥1 % of the main size).
+Without this pruning the map is a blank smear.
+
+**PathID collisions strike again — key sprites by (file, path).** Tiles reference
+sprites as `(m_FileID, m_PathID)` into an external file listed in the level's
+`externals`. File IDs are **1-based** → `externals[N-1]` → matched to `env.files` by
+basename. Cache keys must be `(m_FileID, m_PathID)` **pairs**, never bare path_ids —
+the same PathID in two `sharedassets*.assets` means two different tiles.
+
+**Size caps.** `MAX_OUTPUT_DIM = 4096`, `MAX_OUTPUT_PIXELS = 60_000_000`;
+`choose_ppu` halves pixels-per-{tile,world-unit} until the image fits, keeping the
+PNGs browser-friendly.
+
+**The server contract** (`planner/server/app.py`):
+- `GET /api/hotspots` → `data/hotspots.json` (raw layers, world x/y).
+- `GET /api/maps` → `data/maps.json` (metadata: scenes, `regions[]`, `coordinate_space`,
+  `ppu`/`pixels_per_world_unit`, world bounds).
+- `/maps/*` → static PNGs (`app.mount("/maps", StaticFiles(directory=data/maps))`),
+  e.g. `/maps/level6.png`, `/maps/level2--grid-127625.png`.
+- `dump_maps.py` renders **only scenes that have hotspots** (reads the `scenes` list)
+  and skips empty scenes — metadata won't carry scenes with no hotspot data.
+
+**The UI redraw** (`drawMap()` in `static.py`): a scene selector lists each scene +
+its hotspot point count; a **region dropdown** appears when the selected scene has
+regions, and the region's world bounds (`region.world_min_x <= p.x < region.world_max_x`)
+filter the dots; layer filter pills (all/trees/foraging/fishing/vendors/animals) pick
+which layers render. Dots are painted with a per-layer palette rather than marker icons
+(`trees #6a9248`, `foraging #983d3d`, `fishing #6c9bb1`, `animals #d49a2a`,
+`vendors #5c2a8a`), with a star-shadow + name label for vendors. The
+`coordinate_space` tag is load-bearing: world regions map 1:1, legacy scenes fall
+back to the old ÷ `ppu` heuristic, and any mismatch scatters the dots randomly.
 
 ### The TARGETS wall-of-names trick
 `dump_mono.py` has a `TARGETS` set of class names you extract. **The single
@@ -570,7 +656,15 @@ between-saves log is just those diffs histogrammed against the last snapshot.
 - [ ] Extract **ScriptableObjects** (items/recipes/crops/…) → `dumps/mono/`.
 - [ ] Extract **localization** terms. *(hand-decode if typetree breaks)*
 - [ ] Extract **icons** (PathID-scoped per asset file). *(optional but great)*
-- [ ] Extract **hotspots/maps** if the game has a world to visualize.
+- [ ] Extract **hotspots** (Transform **world** positions per placed object) — the
+      emitted `scenes` list drives map rendering and the map tab's scene selector.
+- [ ] Extract **maps**: per-scene tilemap PNGs + `data/maps.json`. If a scene comes
+      up empty, it's an **aggregate scene** — its Tilemaps live under per-grid
+      region GameObjects; group by parent Grid, drop non-visual layers, render one
+      PNG per region, and tag `coordinate_space: "world"` (legacy single-tilemap
+      scenes instead keep `ppu` tile space). Region dots filter by
+      `world_min/max_x/y`; prune staging fragments to the largest connected cluster.
+      *(TR had to do this for level2/12/18.)*
 - [ ] `synthesize.py` → join mono dumps into `data/*.csv|json`.
 - [ ] `catalog.py` → bridge save-IDs ↔ extracted data (resolve PathID↔item.id).
 - [ ] Encode the **mechanics** that make it a planner (trends, aging, margin…).
@@ -637,6 +731,19 @@ between-saves log is just those diffs histogrammed against the last snapshot.
 8. **Game data is copyright.** Keep `data/` and `dumps/` in `.gitignore`; ship
    only extractor *scripts*. Users run them against their own legally-owned
    game copy.
+9. **Aggregate scenes have no flat tilemap.** If a scene renders empty, its
+   Tilemaps are under per-region `Grid` GameObjects — group by parent Grid, drop
+   non-visual layers, render one PNG per region, tag `coordinate_space: world`.
+10. **Hotspots and maps must share coordinates.** Hotspots and regional maps are
+    both Unity **world** units (place dots 1:1); legacy maps are tile space at
+    `ppu`. The `coordinate_space`/`ppu`/`pixels_per_world_unit` fields in
+    `maps.json` are what keep the dots on the map — a mismatch scatters them.
+11. **Staging fragments inflate the map.** Prune to the largest connected cell /
+    world cluster (`largest_connected_cells`, `primary_world_cluster`), or a
+    fragment hundreds of units away turns the map into a blank smear.
+12. **Key tile sprites by `(m_FileID, m_PathID)`, not bare PathID.** The same
+    PathID in two `sharedassets*.assets` is two different tiles; file IDs in the
+    level's `externals` list are 1-based.
 
 ---
 
@@ -716,6 +823,7 @@ concrete. Treat every row as "what to discover/verify for YOUR game."
 | **Runtime model** | **Mono** (not IL2CPP) — `<Game>_Data/Managed/` exists and `Assembly-CSharp.dll` is managed IL |
 | **Asset format** | Unity bundles: `*.assets`, `sharedassets*`, `level0`–`levelN`, `globalgamemanagers`, `resources.assets` |
 | **Data extractor** | `UnityPy` + `TypeTreeGenerator`; `UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.0"` |
+| **Maps & hotspots** | `dump_hotspots.py`: Transform world positions per placed object (trees/foraging/vendors/animals/fishing/npcs) → `data/hotspots.json`. `dump_maps.py`: levels `level0`–`level27`; simple scenes render from their own `Tilemap` (ppu=16 tile space); **aggregate scenes** `level2` (Tavern exterior `grid-127625` + BarnInterior0/1/2, RoomsMultiplayer grids) `level12` (City), `level18` (Castle Garden) group Tilemaps by parent Grid → one `{scene}--grid-{grid_id}.png` each in **world** space, with SpriteRenderer compositing + `data/maps.json` metadata (`coordinate_space`, world bounds, `pixels_per_world_unit`). Note: level2 interiors have no tilemaps → their hotspots are dropped from the map view. |
 | **Save location** | `%USERPROFILE%\AppData\LocalLow\Louqou\TravellersRest\GameSaves\File_1\SaveFile*.save` (`LocalLow\<Company>\<Game>`) |
 | **Save format** | .NET **BinaryFormatter** (NRBF) — *not* Sirenix Odin (the repo keeps both readers) |
 | **Save parser** | `pypdn` (`NRBF` → `resolveReferences` → `getRoot`), monkey-patched for newer `Dictionary<int,…>` fields |
