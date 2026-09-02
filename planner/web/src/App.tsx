@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchSaves, fetchLanguages, fetchPlan, cheatMoney, cheatSeed, fetchInventoryGrouped, shopBuy, shopSell, fetchBridgeStatus, fetchDebugSaves } from "./api";
+import { fetchSaves, fetchLanguages, fetchPlan, cheatMoney, cheatSeed, fetchInventoryGrouped, shopBuy, shopSell, fetchBridgeStatus, fetchDebugSaves, fetchSinceSave } from "./api";
 import {
   Plan, SaveSlot, Language, CookSuggestion, PlantSuggestion, WeekPlan, TrendItem,
 } from "./types";
@@ -295,6 +295,41 @@ function Cheat({ slot, money, onReload, onError, pushToast, bridgeLive }: { slot
   );
 }
 
+// SLS-1: "things completed since your last save" — TR only persists on sleep,
+// so this panel shows what exists ONLY in the live game right now (live diff
+// catches in-game play; the action log catches planner-initiated mutations).
+function SinceSave({ data }: { data: any }) {
+  if (!data) return null;
+  const moneyD = data.money?.delta_copper ?? 0;
+  const changed: any[] = data.changed_items ?? [];
+  const actions: any[] = data.actions ?? [];
+  if (!changed.length && !actions.length && moneyD === 0) return null;
+  const chip = (text: string, good: boolean) => (
+    <span key={text} style={{ fontSize: 12, padding: "2px 8px", borderRadius: 8,
+      border: `1px solid ${good ? "var(--good, #4e7030)" : "var(--bad, #983d3d)"}`,
+      color: good ? "var(--good, #4e7030)" : "var(--bad, #983d3d)" }}>{text}</span>
+  );
+  return (
+    <div className="card" style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+      <div>
+        <strong>Since last save</strong>{" "}
+        <span style={{ fontSize: 12, opacity: 0.7 }}>
+          (saved {data.save_time} — sleep to persist; quitting before that loses this)
+        </span>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        {moneyD !== 0 && chip(`${moneyD > 0 ? "+" : ""}${fmtMoney(moneyD)}`, moneyD > 0)}
+        {changed.slice(0, 12).map((c) =>
+          chip(`${c.delta > 0 ? "+" : ""}${c.delta} × ${c.name} (${c.save_count} → ${c.live_count})`, c.delta > 0))}
+        {actions.length > 0 &&
+          <span style={{ fontSize: 12, opacity: 0.7 }}>
+            + {actions.length} planner action{actions.length > 1 ? "s" : ""}
+          </span>}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [saves, setSaves] = useState<SaveSlot[]>([]);
   const [langs, setLangs] = useState<Language[]>([]);
@@ -309,6 +344,7 @@ export default function App() {
   const [shopMode, setShopMode] = useState<"buy" | "sell" | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [pulseKey, setPulseKey] = useState(0);
+  const [sinceSave, setSinceSave] = useState<any>(null);
   const toastId = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -408,6 +444,13 @@ export default function App() {
     return () => { alive = false; wsRef.current?.close(); };
   }, [slot, lang]);
 
+  // SLS-1: "since last save" — refetch on every save change and bridge event
+  // (pulseKey bumps on both), so the panel tracks what's not yet persisted.
+  useEffect(() => {
+    if (!slot) return;
+    fetchSinceSave(slot).then(setSinceSave).catch(() => setSinceSave(null));
+  }, [slot, pulseKey]);
+
   // Bridge liveness via planner proxy (/api/bridge/status) — when down, site is read-only (no buy/sell)
   useEffect(() => {
     let alive = true;
@@ -471,6 +514,8 @@ export default function App() {
         <a href="#calendar">Calendar</a>
         <a href="#cheat">Cheat</a>
       </nav>
+
+      <SinceSave data={sinceSave} />
 
       <div style={{ display: "flex" }}>
         <aside style={{ width: 72, background: "var(--parch)", borderRight: "1px solid var(--rule-soft)", padding: 8, display: "flex", flexDirection: "column", gap: 10, alignItems: "center", position: "sticky", top: 40, height: "calc(100vh - 40px)", alignSelf: "flex-start" }}>

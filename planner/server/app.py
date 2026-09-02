@@ -309,6 +309,41 @@ async def _live_status_watcher():
                 pass
 
 
+# ---------- "Since last save" tracker (gap SLS-1) -------------------------------
+# TR persists only on sleep (end of day), so everything between saves exists
+# ONLY in the live game — quitting mid-day would lose it. The tracker keeps:
+#   _sls_baseline — item counts + money from the newest save that has been
+#                   parsed ("truth as of the last save")
+#   _sls_actions  — planner-initiated actions since that save (bridge events
+#                   carry verified before/after)
+# and diffs the live bridge reads against the baseline on demand, so IN-GAME
+# play (not just planner actions) is captured too. A new save resets both.
+
+_sls_baseline: dict = {}        # {slot, save_mtime, item_counts, money_copper}
+_sls_actions: list[dict] = []   # planner-initiated actions since the baseline
+SLS_MAX_ACTIONS = 200
+
+
+def _sls_capture_baseline(state) -> None:
+    """Record the freshly parsed save as the since-last-save baseline. Called
+    from _load_state_for whenever a NEWER save is parsed; a new baseline
+    means the previous deltas are now persisted, so the action log clears."""
+    global _sls_baseline, _sls_actions
+    if state is None or not getattr(state, "save_mtime", None):
+        return
+    if _sls_baseline.get("save_mtime") == state.save_mtime:
+        return  # same save — keep the accumulated deltas
+    _sls_baseline = {
+        "slot": state.slot_id,
+        "save_mtime": state.save_mtime,
+        "item_counts": dict(state.item_counts or {}),
+        "money_copper": int(state.money_copper or 0),
+    }
+    _sls_actions = []
+    print(f"[planner] since-save baseline: save mtime {state.save_mtime:.0f} "
+          f"({len(_sls_baseline['item_counts'])} items)", flush=True)
+
+
 # ---------- Routes -----------------------------------------------------------
 
 @app.get("/api/saves")
@@ -344,11 +379,18 @@ def _load_state_for(slot_id: str | None):
         traceback.print_exc()
         raise
     try:
-        return extract(root, slot_id=slot.slot_id, save_path=latest, save_mtime=mt)
+        state = extract(root, slot_id=slot.slot_id, save_path=latest, save_mtime=mt)
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise
+    # SLS-1: a newly parsed save becomes the since-last-save baseline (a new
+    # save means everything before it is now persisted — deltas reset).
+    try:
+        _sls_capture_baseline(state)
+    except Exception as e:
+        print(f"[planner] since-save baseline capture failed: {e}", flush=True)
+    return state
 
 
 @app.get("/api/state")
@@ -373,6 +415,69 @@ def api_state(slot: str | None = Query(default=None)):
         "unlocked_recipe_ids": list(state.unlocked_recipe_ids),
         "planted_crop_counts": state.planted_crop_counts,
         "item_counts": state.item_counts,
+    }
+
+
+@app.get("/api/since-save")
+def api_since_save(slot: str | None = Query(default=None), lang: str = Query(default=DEFAULT_LANG)):
+    """SLS-1: 'things completed since your last save.'
+
+    TR persists only on sleep, so everything between saves exists only in the
+    live game. This diffs the live bridge reads (inventory + money — catches
+    IN-GAME play, not just planner actions) against the last-parsed save
+    baseline, and lists the planner-initiated actions (with verified
+    before/after) recorded since that save. A new save resets both."""
+    state = _load_state_for(slot)  # refreshes the baseline if a newer save landed
+    if state is None:
+        return JSONResponse({"error": "no save"}, status_code=404)
+    if not _sls_baseline:
+        # First call after server start: establish the baseline now (the
+        # deltas before this point are unknowable — server wasn't watching).
+        _sls_capture_baseline(state)
+
+    live_counts = _fetch_live_bridge_counts()
+    live_money = _fetch_live_bridge_money()
+    live = live_counts is not None
+
+    cat = load_catalog()
+    tr = Translator(lang)
+    base_counts: dict = _sls_baseline.get("item_counts", {})
+    save_money = int(_sls_baseline.get("money_copper", 0))
+
+    changed_items = []
+    if live:
+        for iid in sorted(set(base_counts) | set(live_counts)):
+            save_n = int(base_counts.get(iid, 0))
+            live_n = int(live_counts.get(iid, 0))
+            if live_n == save_n:
+                continue
+            item = cat.items_by_id.get(iid)
+            changed_items.append({
+                "item_id": iid,
+                "name": tr.item(iid, item.name_id if item else None,
+                                fallback=item.name if item else f"#{iid}"),
+                "save_count": save_n,
+                "live_count": live_n,
+                "delta": live_n - save_n,
+            })
+        changed_items.sort(key=lambda c: -abs(c["delta"]))
+
+    live_money_val = live_money if live_money is not None else save_money
+    return {
+        "slot_id": state.slot_id,
+        "save_mtime": _sls_baseline.get("save_mtime"),
+        "save_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_sls_baseline.get("save_mtime", 0))),
+        "live": live,
+        "reason": _live_reason(),
+        "money": {
+            "save_copper": save_money,
+            "live_copper": live_money_val,
+            "delta_copper": live_money_val - save_money,
+        },
+        "changed_count": len(changed_items),
+        "changed_items": changed_items,
+        "actions": list(_sls_actions),
+        "action_count": len(_sls_actions),
     }
 
 
@@ -1213,11 +1318,40 @@ async def api_bridge_push(data: dict, request: Request):
     # Validate minimal shape
     t = str(data.get("type", "bridge_event"))
     ev = data.get("event", data)
+    # SLS-1: record planner-initiated mutations in the since-last-save action
+    # log (they carry verified before/after). Non-mutation events are skipped.
+    try:
+        _sls_record_action(ev)
+    except Exception:
+        pass
     # Broadcast to all web clients for graphical feedback
     await manager.broadcast({"type": "bridge_event", "event": ev, "received_at": __import__("time").time()})
     # Also log for debugging
     print(f"[bridge push] {ev.get('type') if isinstance(ev, dict) else t} -> broadcast bridge_event", flush=True)
     return {"ok": True, "broadcast": True}
+
+
+def _sls_record_action(ev) -> None:
+    """Append a planner-initiated bridge action to the SLS-1 action log."""
+    if not isinstance(ev, dict):
+        return
+    etype = str(ev.get("type", ""))
+    if etype not in ("addItem", "addMoney", "shop/buy", "shop/sell"):
+        return  # value_read / bridge_started / errors are not "things done"
+    data_field = ev.get("data")
+    d: dict = data_field if isinstance(data_field, dict) else {}
+    rec = {"ts": ev.get("ts"), "type": etype}
+    if etype == "addMoney":
+        rec.update({"copper": d.get("copper"), "action": d.get("action"),
+                    "before": d.get("before"), "after": d.get("after")})
+    else:
+        rec.update({"itemId": d.get("itemId"), "count": d.get("count"),
+                    "before": d.get("before"), "after": d.get("after"),
+                    "before_money": d.get("before_money"), "after_money": d.get("after_money"),
+                    "before_item": d.get("before_item"), "after_item": d.get("after_item"),
+                    "price": d.get("price")})
+    _sls_actions.append(rec)
+    del _sls_actions[:-SLS_MAX_ACTIONS]
 
 @app.post("/api/bridge/heartbeat")
 async def api_bridge_heartbeat(data: dict, request: Request):
@@ -1327,7 +1461,8 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 # ---------- Static UI -------------------------------------------------------
-# Prefer the built React app if it exists; otherwise serve a vanilla HTML fallback.
+# The parchment UI is the primary interface. Keep the React prototype available
+# for development without letting a stale local build silently replace it.
 
 from fastapi.responses import HTMLResponse
 from planner.server.static import INDEX_HTML
@@ -1351,7 +1486,8 @@ def api_maps():
 
 WEB_DIST = os.path.join(os.path.dirname(__file__), "..", "web", "dist")
 WEB_DIST = os.path.abspath(WEB_DIST)
-if os.path.isdir(WEB_DIST) and os.path.isdir(os.path.join(WEB_DIST, "assets")):
+USE_REACT_UI = os.environ.get("TR_REACT_UI", "").lower() in {"1", "true", "yes"}
+if USE_REACT_UI and os.path.isdir(WEB_DIST) and os.path.isdir(os.path.join(WEB_DIST, "assets")):
     app.mount("/assets", StaticFiles(directory=os.path.join(WEB_DIST, "assets")), name="assets")
 
     @app.get("/")

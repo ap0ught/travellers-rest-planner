@@ -294,6 +294,24 @@ header.spine .row {
 .bridge-toast.err .t { color: var(--burgundy); }
 .bridge-toast.out { opacity: 0; transition: opacity 0.5s ease; }
 @keyframes toastIn { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* SLS-1: "since last save" strip — what exists only in the live game
+   (TR persists on sleep; quitting before that loses it). Empty = hidden. */
+.since-save {
+  max-width: 1100px;
+  margin: 10px auto 0;
+  padding: 8px 14px;
+  border: 1px solid var(--rule);
+  background: var(--parch-bright);
+  font-size: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+.since-save:empty { display: none; }
+.since-save strong { font-family: var(--font-display-sc); letter-spacing: 0.08em; font-size: 12px; text-transform: uppercase; }
+.since-save small { color: var(--ink-faded); }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
@@ -1923,6 +1941,7 @@ footer.colophon .orn {
 </header>
 
 <div id="bridgeToasts"></div>
+<div id="sinceSave" class="since-save"></div>
 
 <nav class="tabs">
   <div class="row">
@@ -2011,6 +2030,24 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
 const COIN_GOLD = '<img src="/icons/_gold.png" alt="">';
 const COIN_SILVER = '<img src="/icons/_silver.png" alt="">';
 const COIN_COPPER = '<img src="/icons/_copper.png" alt="">';
+/* SLS-1: "since last save" — what exists only in the live game right now */
+async function loadSinceSave() {
+  const host = $("#sinceSave");
+  if (!host) return;
+  try {
+    const s = await jget("/api/since-save?slot=" + encodeURIComponent(STATE.slot));
+    if (!s) { host.innerHTML = ""; return; }
+    const parts = [];
+    const d = s.money ? (s.money.delta_copper || 0) : 0;
+    if (d) parts.push(`<span class="badge ${d > 0 ? "moss" : "wax"}">${d > 0 ? "+" : ""}${fmtMoney(d).replace('class="coin"', 'class="coin" ')}</span>`);
+    for (const c of (s.changed_items || []).slice(0, 10))
+      parts.push(`<span class="badge ${c.delta > 0 ? "moss" : "wax"}">${c.delta > 0 ? "+" : ""}${c.delta} ${esc(c.name)} <small>(${c.save_count} → ${c.live_count})</small></span>`);
+    if (!parts.length) { host.innerHTML = ""; return; }
+    const acts = s.action_count ? ` <small>+ ${s.action_count} planner action${s.action_count > 1 ? "s" : ""}</small>` : "";
+    host.innerHTML = `<strong>Since last save</strong> <small>(${esc(s.save_time)} — sleep to persist)</small> ${parts.join(" ")}${acts}`;
+  } catch (_) { host.innerHTML = ""; }
+}
+
 function fmtMoney(copper) {
   if (copper == null || isNaN(copper)) return '<span class="coin"><span class="zero">—</span></span>';
   copper = Math.round(copper);
@@ -2249,6 +2286,7 @@ function qs() {
 }
 async function loadAll() {
   const Q = qs();
+  loadSinceSave(); // SLS-1: refreshes with every save change + bridge event
   try {
     const [plan, seeds, brewing, brewPlan, recipes, vendors, quests, perks, fish, bushes, reputation, hotspots, maps] = await Promise.all([
       jget("/api/plan?" + Q),

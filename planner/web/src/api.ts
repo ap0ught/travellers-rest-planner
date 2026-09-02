@@ -101,3 +101,8 @@ export async function fetchDebugSaves(): Promise<any> {
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
+export async function fetchSinceSave(slot: string): Promise<any> {
+  const r = await fetch(`${API}/api/since-save?slot=${encodeURIComponent(slot)}`, { cache: "no-store" });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}

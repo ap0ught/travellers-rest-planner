@@ -86,3 +86,25 @@ def test_share_mode_heartbeat_local_only(client, monkeypatch):
     r = client.post("/api/bridge/heartbeat", json={})
     assert r.status_code == 403
     assert not app_module._bridge_live()
+
+
+def test_live_status_broadcast_over_ws(monkeypatch):
+    """G1 end-to-end: live_status is broadcast over a real /ws socket on every
+    mode flip — first beat -> live, stopping beat -> quiet no_bridge. Uses the
+    TestClient lifespan context so the _live_status_watcher task is running."""
+    import json as _json
+    reset_heartbeat()
+    monkeypatch.delenv("TR_HEARTBEAT_TIMEOUT", raising=False)
+    with TestClient(app) as client:  # `with` runs lifespan -> watcher task
+        # connect BEFORE the first beat so the transition broadcast is received
+        with client.websocket_connect("/ws") as ws:
+            client.post("/api/bridge/heartbeat", json={})
+            msg = _json.loads(ws.receive_text())
+            assert msg["type"] == "live_status"
+            assert msg["live"] is True and msg["reason"] == "live"
+            # graceful stopping beat -> immediate quiet broadcast
+            client.post("/api/bridge/heartbeat", json={"stopping": True})
+            msg2 = _json.loads(ws.receive_text())
+            assert msg2["type"] == "live_status"
+            assert msg2["live"] is False and msg2["reason"] == "no_bridge"
+    reset_heartbeat()

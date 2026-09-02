@@ -213,6 +213,32 @@ quietly. Implemented — see G0.
   independent game-process signal (e.g. a supervisor outside the game
   process); deferred unless it proves annoying in practice.
 
+### SLS-1 — "Since last save" tracker ✅
+- **Was:** nothing existed — no baseline, no delta log, no endpoint, no UI —
+  despite being the feature that most justifies a live bridge (TR persists
+  only on sleep; quitting mid-day loses a session of progress).
+- **Fix:**
+  - **Baseline** (`_sls_baseline`): the newest parsed save's item counts +
+    money, captured automatically in `_load_state_for` whenever a NEWER save
+    is parsed; a new baseline clears the action log (the deltas are now
+    persisted).
+  - **Action log** (`_sls_actions`): planner-initiated mutations recorded
+    from bridge pushes, each carrying the verified before/after.
+  - **`GET /api/since-save`**: diffs the bridge's live reads (inventory +
+    money) against the baseline — so IN-GAME play is captured, not just
+    planner actions — returning money delta, changed items (name, save →
+    live counts, delta), and the action log; quiet when the bridge is down.
+  - **UI (both):** React `SinceSave` card ("Since last save (saved HH:MM —
+    sleep to persist; quitting before that loses this)") refetched on every
+    `save_changed` and `bridge_event`; vanilla UI gets a `#sinceSave` strip
+    with moss/wax chips, wired into `loadAll`.
+  - **Tests:** `tests/test_since_save.py` — baseline capture/reset
+    semantics, action-log filtering (mutations recorded, `value_read`
+    skipped), live-vs-save diff against the simulator (in-game-style drift
+    + planner action), offline quiet behavior.
+- **Live-data caveat:** the live diff only exists while the bridge is up;
+  an unsaved session before a planner restart is still lost (noted in Doc B).
+
 ## 4. Open gaps (issue-ready)
 
 ### LV-1 — Live-vs-save provenance only on inventory; UI never renders it
@@ -227,34 +253,20 @@ quietly. Implemented — see G0.
 - **Files:** `planner/server/app.py`, `planner/plan/engine.py`,
   `planner/server/static.py`.
 
-### SLS-1 — "Since last save" tracker absent (the feature that justifies live mode)
-- **Vision:** snapshot `GameState` on every `save_changed`; accumulate bridge
-  deltas (now carrying verified before/after) between saves; render "things
-  completed since your last save." High value because TR only persists on
-  sleep — quitting mid-day loses a session of progress this would surface.
-- **Current:** nothing exists — no baseline snapshot, no delta log, no
-  endpoint, no UI.
-- **Effort:** **L**. **Depends-on:** G0, G1, EV-1 (deltas arrive as bridge
-  events).
-- **Files:** `planner/server/app.py` (new), `planner/server/static.py`.
-
-### TST-1 — No tests for the new contracts
-- **Vision:** tests for heartbeat/mode transitions, before/after verification
-  pass-through, `bridge_event` routing, `live_status` broadcast, token gate —
-  each auto-skipping when the game/bridge is absent (pattern already used by
-  `test_live_seed_happy_path.py`).
-- **Current:** 103 passing tests. Covered: catalog/currency/parser/math/API,
-  bridge realtime + rebroadcast, SEC-1 token gate
-  (`test_share_token.py`), heartbeat mode flips + full planner↔sim
-  integration with verified before/after and the 503 offline refusal
-  (`test_heartbeat.py`, `test_mock_bridge_integration.py` against the
-  `tests/mock_bridge.py` simulator — no game needed). Remaining: `live_status`
-  WS broadcast assertion (needs a WS client test), and updating
-  `test_live_seed_happy_path.py` for the before/after shape with the real
-  game+bridge (the one thing the simulator can't prove — in-game DLL
-  behavior).
-- **Effort:** **S/M**. **Depends-on:** G0 ✅, G1 ✅.
-- **Files:** `tests/` (new), `tests/test_live_seed_happy_path.py` (update).
+### TST-1 — Tests for the new contracts ✅ (live happy-path update remains)
+- **Done:** 112 passing tests now cover every planner-side work item —
+  token gate (`test_share_token.py`), heartbeat/mode + reasons + stopping
+  beat (`test_heartbeat.py`, including a **real-socket `live_status`
+  broadcast test**), full planner↔sim integration with verified
+  before/after and 503 refusal (`test_mock_bridge_integration.py`), the
+  since-save tracker (`test_since_save.py`), the vanilla UI's label builder
+  (node-driven, `test_ui_js.py`), and internal-field leak prevention. React
+  UI is compile-checked (`tsc -b` + vite build); vanilla UI's JS is
+  `node --check`ed.
+- **Remaining:** update `test_live_seed_happy_path.py` for the
+  before/after response shape against the REAL game+bridge (live checklist
+  §6 L3) — the one thing the simulator can't prove. See §7 for the full
+  work-item → test map.
 
 ---
 
